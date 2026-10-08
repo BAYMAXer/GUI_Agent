@@ -138,12 +138,17 @@ def validate_action(act: Action) -> Optional[str]:
         return f"未知动作类型「{act.action}」。可选动作：{', '.join(ACTION_REGISTRY)}"
     if any(k in act.args for k in ("x", "y", "x1", "y1", "x2", "y2", "grounding_failed")):
         return "策略只能输出语义目标，不能提供执行器内部坐标或状态字段"
-    for key in ("target", "from_target", "to_target", "text", "option", "url", "key"):
+    for key in ("target", "from_target", "to_target", "text", "option", "url", "key", "query", "scope_ref", "cursor"):
         if key in act.args and not isinstance(act.args[key], str):
             return f"{key} 必须是字符串"
     for key in ("target_ref",):
         if key in act.args and (not isinstance(act.args[key], str) or not act.args[key]):
             return f"{key} 必须是当前观察中的非空节点引用"
+    if "target_hint" in act.args:
+        hint = act.args["target_hint"]
+        if (not isinstance(hint, dict) or any(k not in {"name", "role", "scope", "scope_ref"} for k in hint)
+                or any(not isinstance(v, str) for v in hint.values())):
+            return "target_hint 必须是含可选 name/role/scope/scope_ref 字符串的对象"
     if "overwrite" in act.args and not isinstance(act.args["overwrite"], bool):
         return "overwrite 必须是布尔值"
     missing = [k for k in spec.params if act.args.get(k) in (None, "")]

@@ -48,6 +48,11 @@ class Environment(ABC):
         """可选：取得新观察。旧 adapter 返回 None，保留已有观察。"""
         return None
 
+    @property
+    def browser_session(self):
+        """Optional focused CDP capability shared by local and OSWorld adapters."""
+        return getattr(self, "_browser_session", None) or getattr(self, "session", None)
+
     def route_action(self, action: Action, observation: Observation) -> Optional[dict]:
         """可选：确定性通道。None 表示继续现有视觉定位。"""
         return None

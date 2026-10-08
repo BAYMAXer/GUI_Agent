@@ -1,6 +1,6 @@
 """Observe a real Windows Chrome fixture without OSWorld or API credentials.
 
-For a Qwen-driven task use run_browser_windows.py.
+For a model-driven task use run_browser_windows.py.
 For the deterministic pipeline smoke use script/smoke_browser_windows.py.
 """
 from pathlib import Path

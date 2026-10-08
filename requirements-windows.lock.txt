@@ -1,5 +1,6 @@
 # Browser + Web GUI runtime, verified in an isolated Windows x64 / Python 3.12 venv.
 # Refresh deliberately after running the portability smoke and tests.
+# Historical pip snapshot. The current Windows scripts use uv.lock instead.
 annotated-doc==0.0.5
 annotated-types==0.8.0
 anyio==4.15.1

@@ -33,7 +33,7 @@ def launch_browser(playwright, channel, headless):
 
 class BrowserEnvironment(Environment):
     supported_actions = {"click", "double_click", "right_click", "type", "scroll", "select",
-                         "press", "hotkey", "goto", "wait", "get_page_source", "request_finish", "fail"}
+                         "press", "hotkey", "goto", "wait", "get_page_source", "inspect_page", "request_finish", "fail"}
 
     def __init__(self, start_url="about:blank", *, headless=True, channel=None,
                  width=1280, height=800, endpoint=None, evaluator=None, settle_ms=120):
@@ -91,7 +91,8 @@ class BrowserEnvironment(Environment):
         screenshot = None
         if self.session.page is not None:
             try:
-                screenshot = Image.open(BytesIO(self.session.page.screenshot(scale="css"))).convert("RGB")
+                # Default caret hiding injects/removes a stylesheet, invalidating the DOM watcher.
+                screenshot = Image.open(BytesIO(self.session.page.screenshot(scale="css", caret="initial"))).convert("RGB")
             except Exception as exc:
                 info["screenshot_error"] = str(exc)[:300]
         return Observation(screenshot=screenshot, info=info, context=[block] if block else [])

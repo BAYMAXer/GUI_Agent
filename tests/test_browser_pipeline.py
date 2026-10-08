@@ -242,9 +242,9 @@ def test_api_client_records_exact_messages_usage_and_reuses_connection():
     def handler(request):
         seen.append(json.loads(request.content))
         return httpx.Response(200, json={"id": "test-response", "object": "chat.completion", "created": 1,
-            "model": "qwen-api-test", "choices": [{"index": 0, "message": {"role": "assistant", "content": "  {\"next_action\":{\"type\":\"wait\",\"seconds\":1}}\n"}, "finish_reason": "stop"}],
+            "model": "planning-api-test", "choices": [{"index": 0, "message": {"role": "assistant", "content": "  {\"next_action\":{\"type\":\"wait\",\"seconds\":1}}\n"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 42, "completion_tokens": 20, "total_tokens": 62}})
-    model = ChatModel(ModelConfig(name="qwen-api-test", thinking_style="dashscope"))
+    model = ChatModel(ModelConfig(name="planning-api-test", thinking_style="dashscope"))
     model._client = OpenAI(api_key="test-only", base_url="https://test.invalid/v1", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
     messages = [{"role": "user", "content": "JSON please"}]
     try:

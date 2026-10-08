@@ -6,8 +6,8 @@
         --vm-path /data/osworld-agent-s/vm/uploaded/Ubuntu.qcow2 \
         --test-meta /osworld/evaluation_examples/test_small.json \
         --result-dir /data/osworld-agent-s/results/<RUN_ID> \
-        --model Qwen3.5-9B --model-url http://7.246.80.237:9028/v1 \
-        --ground-model UI-TARS-1.5-7B --ground-url http://7.246.80.237:49999/v1
+        --model planning --model-url http://7.246.80.237:9028/v1 \
+        --ground-model grounding_pixel --ground-url http://7.246.80.237:49999/v1
 """
 from __future__ import annotations
 
@@ -22,12 +22,12 @@ _pkg = os.path.dirname(_here)
 if _pkg not in sys.path:
     sys.path.insert(0, _pkg)
 
-from osworld_agent.config import ModelConfig  # noqa: E402
+from osworld_agent.config import ModelConfig, GroundingConfig  # noqa: E402
+from osworld_agent.config.model_registry import GROUNDING_PROTOCOLS, normalize_grounding_protocol  # noqa: E402
+from osworld_agent.model.grounding import build_grounding_model  # noqa: E402
 from osworld_agent.model import ChatModel  # noqa: E402
 from osworld_agent.agent import Agent  # noqa: E402
 from osworld_agent.adapters.docker_env import DockerEnvironment  # noqa: E402
-from osworld_agent.adapters.uitars_grounding import RealUItarsGrounding  # noqa: E402
-from osworld_agent.adapters.uivenus2_grounding import UIVenus2Grounding  # noqa: E402
 
 
 def load_manifest(path: str) -> dict:
@@ -48,12 +48,12 @@ def main() -> int:
     parser.add_argument("--vm-path", required=True)
     parser.add_argument("--test-meta", required=True)
     parser.add_argument("--result-dir", required=True)
-    parser.add_argument("--model", default="Qwen3.5-9B")
+    parser.add_argument("--model", default="planning")
     parser.add_argument("--model-url", default="http://7.246.80.237:9028/v1")
-    parser.add_argument("--ground-model", default="UI-TARS-1.5-7B")
+    parser.add_argument("--ground-model", default="grounding_pixel")
     parser.add_argument("--ground-url", default="http://7.246.80.237:49999/v1")
-    parser.add_argument("--ground-type", default="ui-tars", choices=["ui-tars", "ui-venus2"],
-                        help="grounding 模型类型：ui-tars / ui-venus2")
+    parser.add_argument("--ground-type", default="auto", type=normalize_grounding_protocol, choices=GROUNDING_PROTOCOLS,
+                        help="grounding 协议：auto / structured / pixel / normalized")
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--screen-width", type=int, default=1920)
     parser.add_argument("--screen-height", type=int, default=1080)
@@ -80,14 +80,9 @@ def main() -> int:
             instruction = str(task_config.get("instruction") or task_id)
 
             model = ChatModel(model_cfg)
-            if args.ground_type == "ui-venus2":
-                grounding = UIVenus2Grounding(
-                    url=args.ground_url, api_key="EMPTY", model=args.ground_model,
-                    width=args.screen_width, height=args.screen_height)
-            else:
-                grounding = RealUItarsGrounding(
-                    url=args.ground_url, api_key="EMPTY", model=args.ground_model,
-                    width=args.screen_width, height=args.screen_height)
+            grounding = build_grounding_model(GroundingConfig(name=args.ground_model, url=args.ground_url,
+                api_key="EMPTY", protocol=args.ground_type,
+                width=args.screen_width, height=args.screen_height))
             env = DockerEnvironment(
                 task_config=task_config, vm_path=args.vm_path, headless=True,
                 screen_width=args.screen_width, screen_height=args.screen_height)

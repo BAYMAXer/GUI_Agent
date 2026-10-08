@@ -13,8 +13,9 @@ from .decision_model import (
 )
 from .grounding import (
     Grounding,
+    GroundingRequest,
     GroundingResult,
-    UItarsGrounding,
+    PixelGrounding,
     NullGrounding,
     resolve_coords,
     mark_coordinate,
@@ -25,6 +26,6 @@ from .grounding import (
 __all__ = [
     "ChatModel", "ChatMessage", "MODEL_REGISTRY", "resolve_model_name",
     "build_decision_model",
-    "Grounding", "GroundingResult", "UItarsGrounding", "NullGrounding",
+    "Grounding", "GroundingRequest", "GroundingResult", "PixelGrounding", "NullGrounding",
     "resolve_coords", "mark_coordinate", "GROUNDING_REGISTRY", "build_grounding_model",
 ]

@@ -113,6 +113,12 @@ actions:
     kind: browser
     resolve: none
 
+  inspect_page:
+    params: [query]
+    description: "按query检索局部网页语义；scope_ref可限定区域，cursor可继续读取。只在browser_use=1时使用"
+    kind: browser
+    resolve: none
+
   call_code_agent:
     params: []
     description: "委托子 Agent 执行批量代码/文件操作（task 可省略，省略则处理整个任务；如 openpyxl 批量填表、unzip 解压、pdftotext 提取文本）"

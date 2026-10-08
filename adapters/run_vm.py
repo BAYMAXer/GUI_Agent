@@ -15,13 +15,13 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from typing import Any, Dict
 
 from ..config import Config
-from ..model import build_decision_model, GROUNDING_REGISTRY
+from ..model import build_decision_model, build_grounding_model
 from ..agent import Agent
 from .vmware_env import VMwareEnvironment
-from .uitars_grounding import RealUItarsGrounding
 from .task_loader import load_task_config
 
 
@@ -47,15 +47,8 @@ def main() -> None:
     model = build_decision_model(cfg.model)
 
     # 3) 真实 grounding
-    entry = GROUNDING_REGISTRY.get(cfg.grounding_model.name)
-    grounding_model_name = entry.name if entry else cfg.grounding_model.name
-    grounding = RealUItarsGrounding(
-        url=cfg.grounding_model.url,
-        api_key=cfg.grounding_model.api_key,
-        model=grounding_model_name,
-        width=args.screen_width,
-        height=args.screen_height,
-    )
+    grounding = build_grounding_model(replace(cfg.grounding_model,
+        width=args.screen_width, height=args.screen_height))
 
     # 4) VMware 环境
     env = VMwareEnvironment(

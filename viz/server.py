@@ -20,6 +20,7 @@ from pathlib import Path
 from fastapi import FastAPI, WebSocket, Request
 from fastapi.responses import HTMLResponse, FileResponse, Response
 import uvicorn
+from ..config.model_registry import PROTOCOL_ALIASES, resolve_model_name, resolve_grounding_protocol
 
 app = FastAPI(title="osworld_agent Viz")
 
@@ -317,7 +318,7 @@ async def test_connection(request: Request):
         cfg = await request.json()
     except Exception:
         cfg = {}
-    model = cfg.get("model", "Qwen3.5-9B")
+    model = resolve_model_name(cfg.get("model", "planning"))
     url = cfg.get("model_url", "http://7.246.80.237:9028/v1")
     api_key = cfg.get("model_api_key") or "EMPTY"
     png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")
@@ -357,13 +358,13 @@ async def start_run(request: Request):
     if not DESKTOP_ENV_PATH:
         return {"ok": False, "error": "未配置 OSWORLD_DESKTOP_ENV_PATH（包含 desktop_env 的目录）"}
 
-    model = cfg.get("model", "Qwen3.5-9B")
+    model = cfg.get("model", "planning")
     model_url = cfg.get("model_url", "http://7.246.80.237:9028/v1")
     model_api_key = cfg.get("model_api_key") or "EMPTY"
-    ground_model = cfg.get("ground_model", "UI-TARS-1.5-7B")
+    ground_model = cfg.get("ground_model", "grounding_pixel")
     ground_url = cfg.get("ground_url", "http://7.246.80.237:49999/v1")
     ground_api_key = cfg.get("ground_api_key", "EMPTY")
-    ground_type = cfg.get("ground_type", "ui-tars")
+    ground_type = cfg.get("ground_type", "auto")
     max_steps = int(cfg.get("max_steps", 20))
 
     cmd = [
@@ -462,10 +463,12 @@ async def model_presets():
             data = yaml.safe_load(f) or {}
         return {
             "decision_models": data.get("decision_models") or [],
-            "grounding_models": data.get("grounding_models") or [],
+            "grounding_models": [dict(row, type=resolve_grounding_protocol(row["name"], row.get("type", "auto")))
+                                 for row in data.get("grounding_models") or []],
+            "protocol_aliases": PROTOCOL_ALIASES,
         }
     except Exception as exc:  # noqa: BLE001
-        return {"decision_models": [], "grounding_models": [], "error": str(exc)}
+        return {"decision_models": [], "grounding_models": [], "protocol_aliases": PROTOCOL_ALIASES, "error": str(exc)}
 
 
 @app.post("/run/manual-eval")
@@ -588,7 +591,7 @@ def _first_image_url(messages):
 def _make_annotation_image(messages, coords, kind, is_pixel=False):
     """在原图上画标注（point=绿圈，bbox=红框+中心点），返回 data URL。
 
-    is_pixel: True 表示 coords 已是像素坐标（如 UI-TARS），False 表示 [0,1000] 归一化（如 UI-Venus-2）。
+    is_pixel: True 表示 coords 已是像素坐标，False 表示 [0,1000] 归一化坐标。
     """
     url = _first_image_url(messages)
     if not url:
@@ -629,7 +632,7 @@ def _make_annotation_image(messages, coords, kind, is_pixel=False):
 async def debug_chat(request: Request):
     """会话调试：代理前端请求到任意 OpenAI 兼容模型端点（决策 / grounding 都走这里）。
 
-    前端 payload: {engine:{engine_type,model,base_url}, messages, generation, api_key}
+    前端 payload: {engine:{engine_type,model,base_url,grounding_protocol}, messages, generation, api_key}
     返回: {"ok": True, "response": ...} 或 {"ok": False, "error": ...}
     """
     try:
@@ -649,6 +652,11 @@ async def debug_chat(request: Request):
         return {"ok": False, "error": "缺少模型名"}
     if not base_url:
         return {"ok": False, "error": "缺少模型 URL"}
+    try:
+        protocol = resolve_grounding_protocol(model, engine.get("grounding_protocol", "auto"))
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc)}
+    model = resolve_model_name(model)
 
     # 规范化 messages：content 保持原样（字符串或 OpenAI vision 多部分列表都兼容）
     normalized = []
@@ -674,7 +682,7 @@ async def debug_chat(request: Request):
             "messages": normalized,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            # 关闭 Qwen 思考模式，让 grounding 直接输出 [x,y] 坐标而非冗长推理
+            # 关闭思考模式，让 grounding 直接输出定位结果。
             "chat_template_kwargs": {"enable_thinking": False},
         }
         last_err = None
@@ -691,9 +699,7 @@ async def debug_chat(request: Request):
                 parsed = _extract_grounding_coords(content)
                 annotation = None
                 if parsed:
-                    # UI-TARS 返回像素坐标，UI-Venus-2 返回 [0,1000] 归一化
-                    is_pixel = "tars" in model.lower() or "uitars" in model.lower()
-                    annotation = _make_annotation_image(normalized, parsed[0], parsed[1], is_pixel=is_pixel)
+                    annotation = _make_annotation_image(normalized, parsed[0], parsed[1], is_pixel=protocol == "pixel")
                 return {"ok": True, "response": content, "annotation_image": annotation}
             except Exception as exc:  # noqa: BLE001
                 last_err = str(exc)

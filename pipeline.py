@@ -34,6 +34,7 @@ from .prompts import build_user_prompt, build_format_feedback
 from .context import PromptCompiler
 from .config import ContextConfig
 from .model.decision_model import encode_image
+from .model.grounding import GroundingRequest, screenshot_image
 from .scene import observation_scene, browser_context
 
 # 确定性卡死检测参数
@@ -90,6 +91,10 @@ class StepState:
     shell_outputs: List[str] = field(default_factory=list)   # 最近 shell 命令输出（用于 shell 卡死检测）
     prompt_metadata: Dict[str, Any] = field(default_factory=dict)
     route: Optional[dict] = None
+    grounding_calls: List[dict] = field(default_factory=list)
+    grounding_metadata: dict = field(default_factory=dict)
+    inspected_page: Optional[dict] = None
+    offline_grounding_labels: list = field(default_factory=list)
 
 
 @dataclass
@@ -157,6 +162,10 @@ class Pipeline:
             messages = self.build_input(state)
             before = self._observation_record(state.obs, f"o_{step_no}")
             decision = self.decide(messages)
+            for call in decision.calls:
+                call["actor_role"] = "decision"
+                call["provenance"] = "sampled"
+                call["prompt_metadata"] = copy.deepcopy(state.prompt_metadata)
             result.steps = step_no
             if decision.action is None:
                 # 动作解析/校验失败：空转一步继续（对齐 Agent S3 的 wait 语义），
@@ -165,7 +174,7 @@ class Pipeline:
                     "step": step_no, "error": "动作解析失败",
                     "raw": (decision.raw or "")[-500:],
                     "observation": before, "policy_input": copy.deepcopy(decision.calls[-1]["messages"] if decision.calls else messages),
-                    "policy_output": decision.raw, "decision_calls": decision.calls,
+                    "policy_output": decision.raw, "decision_calls": decision.calls, "model_calls": decision.calls,
                     "prompt_metadata": state.prompt_metadata, "valid_action": False,
                     "terminated": False, "truncated": False,
                 })
@@ -189,6 +198,9 @@ class Pipeline:
                 "next_observation": self._observation_record(state.obs, f"o_{step_no+1}"),
                 "policy_input": copy.deepcopy(decision.calls[-1]["messages"] if decision.calls else messages),
                 "policy_output": decision.raw, "decision_calls": decision.calls,
+                "model_calls": decision.calls + copy.deepcopy(state.grounding_calls),
+                "grounding_metadata": copy.deepcopy(state.grounding_metadata),
+                "offline_grounding_labels": copy.deepcopy(state.offline_grounding_labels),
                 "prompt_metadata": state.prompt_metadata, "valid_action": True,
                 "resolved_action": {"action": action.action, "args": action.args},
                 "routing": copy.deepcopy(state.route) or {"channel": "visual" if self._coordinate_of(action) else "environment"},
@@ -244,6 +256,19 @@ class Pipeline:
         state.page_source = ""  # 一次性返回后清空，避免每步重复塞大段源码
         state.page_source_scope = ("", "")
         blocks = list(browser_context(state.obs))
+        subgoal = state.memory.task_state.get("current_subgoal", "") if state.memory else ""
+        session = getattr(self.env, "browser_session", None)
+        if blocks and session and getattr(session, "index", None):
+            try:
+                selected = session.index.overview(state.task + " " + subgoal, limit=20)
+                session.enrich(n["ref"] for n in selected)
+            except Exception as exc:
+                state.obs.info["candidate_inspection_error"] = type(exc).__name__
+        if state.inspected_page is not None:
+            if state.inspected_page.get("snapshot_id") == scene.get("snapshot_id") and blocks:
+                # A requested local view is a first-class observation, not a truncated HTML string.
+                blocks = [state.inspected_page]
+            state.inspected_page = None
         scene_hint = {k: scene.get(k) for k in ("browser_use", "structure_available", "mode", "reason")}
         blocks.insert(0, {"kind": "scene", "text": "当前场景: " + json.dumps(scene_hint, ensure_ascii=False)})
         if state.obs:
@@ -254,11 +279,12 @@ class Pipeline:
                                "code_agent": state.code_agent_result, "page_source": page_source}, ensure_ascii=False)
         user_text, images, metadata = self.compiler.compile(system=self.system_prompt, task=state.task,
             memory=state.memory_text, blocks=blocks, auxiliary=auxiliary,
-            images=self._build_images(state) if getattr(self.model, "vision", True) else [])
+            images=self._build_images(state) if getattr(self.model, "vision", True) else [], subgoal=subgoal)
         state.prompt_metadata = metadata
         state.prompt_metadata["scene"] = copy.deepcopy(scene)
         if state.obs:
             state.obs.info["exposed_refs"] = metadata["exposed_refs"]
+            state.obs.info["ref_aliases"] = metadata["ref_aliases"]
         return [
             {"role": "system", "content": self.system_prompt},
             self.model.build_vision_message(user_text, images),
@@ -278,8 +304,9 @@ class Pipeline:
             try:
                 raw = self.model.chat(messages, json_mode=True)
             except Exception as exc:
-                calls.append({"messages": copy.deepcopy(messages), "error_type": type(exc).__name__,
-                              "valid_action": False, "transport": copy.deepcopy(getattr(self.model, "last_call", {}))})
+                call = copy.deepcopy(getattr(self.model, "last_call", {}))
+                call.update({"messages": copy.deepcopy(messages), "error_type": type(exc).__name__, "valid_action": False})
+                calls.append(call)
                 return Decision(raw="", action=None, calls=calls)
             call = copy.deepcopy(getattr(self.model, "last_call", {}))
             call.update({"messages": copy.deepcopy(messages), "response": raw, "valid_action": False})
@@ -322,6 +349,9 @@ class Pipeline:
         state.last_grounding_target = str(action.args.get("target", "")
                                           or action.args.get("from_target", ""))
         state.route = None
+        state.grounding_calls = []
+        state.grounding_metadata = {}
+        state.offline_grounding_labels = []
         if browser_context(state.obs):
             try:
                 state.route = self.env.route_action(action, state.obs)
@@ -334,13 +364,101 @@ class Pipeline:
             state.route = {"channel": "reobserve", "reason": "No structured observation for this reference"}
             state.last_grounding_coord = None
             return action
+        if browser_context(state.obs) and action.action in {"click", "double_click", "right_click", "type", "select"}:
+            resolved = self._ground_browser(action, state)
+            if resolved is not None:
+                state.last_grounding_coord = self._coordinate_of(resolved)
+                return resolved
         try:
-            resolved = self._resolve(action, state.obs)
+            resolved = self._resolve(action, state.obs, state)
         except Exception as exc:
             state.route = {"channel": "grounding_failed", "error_type": type(exc).__name__}
             resolved = Action(action.action, {**action.args, "grounding_failed": True})
         state.last_grounding_coord = self._coordinate_of(resolved)
         return resolved
+
+    def _ground_browser(self, action, state):
+        session = getattr(self.env, "browser_session", None)
+        if not session or not getattr(session, "index", None):
+            return None
+        scene = observation_scene(state.obs)
+        if not session.snapshot or session.snapshot["snapshot_id"] != scene.get("snapshot_id"):
+            state.route = {"channel": "reobserve", "reason": "Browser snapshot changed before retrieval"}
+            return action
+        target = action.args.get("target", "")
+        hint = dict(action.args.get("target_hint", {}))
+        if hint.get("scope_ref"):
+            ref = state.obs.info.get("ref_aliases", {}).get(hint["scope_ref"], hint["scope_ref"])
+            if ref not in state.obs.info.get("exposed_refs", []):
+                state.route = {"channel": "reobserve", "reason": "Scope reference was not in the decision input"}
+                return action
+            hint["scope_ref"] = ref
+        subgoal = state.memory.task_state.get("current_subgoal", "") if state.memory else ""
+        try:
+            exact = session.index.exact(target, action=action.action, hint=hint)
+            if exact:
+                resolved = Action(action.action, {**action.args, "target_ref": exact["ref"]})
+                state.route = session.route(resolved, state.obs, allowed_refs=[exact["ref"]], provenance="deterministic")
+                state.grounding_metadata = {"kind": "deterministic", "snapshot_id": session.snapshot["snapshot_id"],
+                    "target_ref": exact["ref"], "label_provenance": "offline_deterministic",
+                    "candidate_view": [exact], "ref_aliases": {session.index.short[exact["ref"]]: exact["ref"]}}
+                compiler = getattr(self.grounding, "compile_request", None)
+                if compiler:
+                    try:
+                        pool = session.index.retrieve(target, action=action.action, hint=hint, subgoal=subgoal, limit=20)
+                        request = GroundingRequest(state.obs.screenshot, target, action=action.action, mode="node",
+                            target_hint=hint, candidates=pool, snapshot_id=session.snapshot["snapshot_id"],
+                            ref_aliases={session.index.short[n["ref"]]: n["ref"] for n in pool}, subgoal=subgoal)
+                        messages, metadata = compiler(request)
+                        alias = next(a for a, r in metadata["ref_aliases"].items() if r == exact["ref"])
+                        state.offline_grounding_labels.append({"actor_role": "grounding", "messages": messages,
+                            "response": json.dumps({"status": "ok", "target_ref": alias, "point": None}),
+                            "prompt_metadata": metadata, "valid_action": True, "provenance": "offline_deterministic",
+                            "policy_revision": None})
+                    except (ValueError, StopIteration):
+                        pass  # Direct execution does not depend on constructing an offline training example.
+                return resolved
+            if not getattr(self.grounding, "supports_nodes", False):
+                return None
+            cfg = getattr(self.grounding, "context_config", None)
+            limit = getattr(cfg, "candidate_limit", 20)
+            max_calls = min(2, max(1, getattr(cfg, "max_calls", 2)))
+            for attempt in range(max_calls):
+                pool = session.index.retrieve(target, action=action.action, hint=hint, subgoal=subgoal, limit=limit)
+                if not pool:
+                    return None if attempt == 0 else self._reject_grounding(action, state, "No additional candidates")
+                session.enrich(n["ref"] for n in pool)
+                pool = [session.index.record(session.nodes[n["ref"]], n.get("retrieval_score")) for n in pool]
+                request = GroundingRequest(state.obs.screenshot, target, action=action.action, mode="node",
+                    target_hint=hint, candidates=pool, snapshot_id=session.snapshot["snapshot_id"],
+                    ref_aliases={session.index.short[n["ref"]]: n["ref"] for n in pool},
+                    subgoal=subgoal, expanded=attempt > 0,
+                    roi=self._browser_roi(state.obs, [n.get("scope_ref") for n in pool]))
+                result = self.grounding.resolve(request)
+                state.grounding_calls.extend(copy.deepcopy(result.calls))
+                state.grounding_metadata = {"kind": "sampled", "retrieved_count": len(pool),
+                    "candidate_view": pool, "snapshot_id": request.snapshot_id, "result_status": result.status,
+                    **result.metadata}
+                if result.status == "ok" and result.target_ref:
+                    # A model may only select refs actually serialized into THIS invocation.
+                    allowed = result.metadata.get("candidate_refs", [])
+                    if result.target_ref not in allowed or result.target_ref not in {n["ref"] for n in pool}:
+                        return self._reject_grounding(action, state, "Grounder returned an unexposed reference")
+                    resolved = Action(action.action, {**action.args, "target_ref": result.target_ref})
+                    state.route = session.route(resolved, state.obs, allowed_refs=allowed, provenance="grounding")
+                    return resolved
+                if result.status != "need_more":
+                    return self._reject_grounding(action, state, result.reason or result.status)
+                limit = min(40, getattr(cfg, "expanded_candidate_limit", 40))
+            return self._reject_grounding(action, state, "Candidate expansion limit reached; refine the target")
+        except Exception as exc:
+            state.route = {"channel": "reobserve", "reason": f"Candidate retrieval unavailable: {type(exc).__name__}"}
+            return action
+
+    @staticmethod
+    def _reject_grounding(action, state, reason):
+        state.route = {"channel": "grounding_failed", "reason": reason}
+        return Action(action.action, {**action.args, "grounding_failed": True})
 
     def execute(self, action: Action, state: StepState) -> Execution:
         name = action.action
@@ -348,7 +466,8 @@ class Pipeline:
             return Execution(kind="browser_dom", outcome=state.route["reason"],
                 executed="rejected", info={"status": "rejected", "dispatched": False})
         if action.args.get("grounding_failed"):
-            return Execution(kind="env", outcome="定位失败，未执行；请换目标或方法",
+            return Execution(kind="env", outcome="定位失败，未执行；请细化目标或使用inspect_page。" +
+                             str((state.route or {}).get("reason", "")),
                 executed="rejected", info={"status": "rejected", "dispatched": False})
         if state.route and state.route.get("channel") == "browser_dom":
             try:
@@ -393,6 +512,33 @@ class Pipeline:
             if scene.get("browser_use") != 1:
                 return Execution(kind="browser", executed="rejected", outcome="当前为纯视觉模式，不读取网页源码",
                                  info={"status": "rejected", "dispatched": False})
+            if name == "inspect_page":
+                session = getattr(self.env, "browser_session", None)
+                if not session or not scene.get("structure_available"):
+                    return Execution(kind="browser", executed="rejected", outcome="No focused browser index",
+                                     info={"status": "rejected", "dispatched": False})
+                scope_ref = action.args.get("scope_ref")
+                if scope_ref:
+                    scope_ref = state.obs.info.get("ref_aliases", {}).get(scope_ref, scope_ref)
+                    if scope_ref not in state.obs.info.get("exposed_refs", []):
+                        return Execution(kind="browser", executed="rejected", outcome="Scope was not exposed",
+                                         info={"status": "rejected", "dispatched": False})
+                try:
+                    view = session.inspect(action.args["query"], scope_ref, action.args.get("cursor"))
+                    state.inspected_page = view
+                    return Execution(kind="browser", executed="inspect_page", outcome="Local AX view will be returned",
+                        obs=state.obs, info={"status": "executed", "dispatched": False, "next_cursor": view["next_cursor"],
+                                            "snapshot_id": view["snapshot_id"], "query": view["query"]})
+                except Exception as exc:
+                    return Execution(kind="browser", executed="rejected", outcome=str(exc),
+                                     info={"status": "rejected", "dispatched": False})
+            ref = action.args.get("target_ref")
+            if ref:
+                ref = state.obs.info.get("ref_aliases", {}).get(ref, ref)
+                if ref not in state.obs.info.get("exposed_refs", []):
+                    return Execution(kind="browser", executed="rejected", outcome="Source reference was not exposed",
+                                     info={"status": "rejected", "dispatched": False})
+                action = Action(name, {**action.args, "target_ref": ref})
             source = self.env.get_source_for_action(action)
             state.page_source = source[:12000] + ("\n...(源码过长已截断)" if len(source) > 12000 else "")
             state.page_source_scope = (scene.get("page_id", ""), scene.get("url", ""))
@@ -596,6 +742,8 @@ class Pipeline:
 
     def _build_images(self, state: StepState) -> List[Tuple[str, Any]]:
         history = state.screenshot_history
+        if not history:
+            return [("【当前截图 S(t)，原图】", state.obs.screenshot)] if state.obs else []
         n = len(history)
         images: List[Tuple[str, Any]] = []
         if n >= 3:
@@ -750,17 +898,70 @@ class Pipeline:
                     f"可选技能：{', '.join(enabled_skills())}")
         return validate_action(action)
 
-    def _resolve(self, action: Action, obs: Observation) -> Action:
+    def _browser_roi(self, obs, refs):
+        session = getattr(self.env, "browser_session", None)
+        refs = set(refs)
+        if (not browser_context(obs) or not session or obs.info.get("coordinate_space") != "css_viewport"
+                or len(refs) != 1 or None in refs):
+            return None
+        try:
+            ref = next(iter(refs))
+            session.enrich([ref])
+            viewport = session.snapshot["viewport"]
+            w, h = screenshot_image(obs.screenshot).size
+            if abs(viewport["width"] - w) > 1 or abs(viewport["height"] - h) > 1:
+                return None
+            node = session.nodes[ref]
+            if not node.get("in_viewport") or not node.get("bounds"):
+                return None
+            x, y, bw, bh = node["bounds"]
+            left, top = max(0, int(x - viewport["x"] - 32)), max(0, int(y - viewport["y"] - 32))
+            right, bottom = min(w, int(x - viewport["x"] + bw + 32)), min(h, int(y - viewport["y"] + bh + 32))
+            if min(right - left, bottom - top) < 64 or (right - left) * (bottom - top) > w * h * .8:
+                return None
+            return left, top, right, bottom
+        except (ValueError, OSError, KeyError):
+            return None
+
+    def _locate_point(self, target, action, obs, state=None):
+        hint = dict(action.args.get("target_hint", {}))
+        if not browser_context(obs):
+            hint.pop("scope_ref", None)
+        roi = None
+        if hint.get("scope_ref") and browser_context(obs):
+            ref = obs.info.get("ref_aliases", {}).get(hint["scope_ref"], hint["scope_ref"])
+            if ref in obs.info.get("exposed_refs", []):
+                roi = self._browser_roi(obs, [ref])
+        cfg = getattr(self.grounding, "context_config", None)
+        max_calls = min(2, max(1, getattr(cfg, "max_calls", 1)))
+        feedback = ""
+        for attempt in range(max_calls):
+            request = GroundingRequest(obs.screenshot, target, action=action.action, target_hint=hint,
+                roi=roi, expanded=attempt > 0, feedback=feedback)
+            resolver = getattr(self.grounding, "resolve", None)
+            result = resolver(request) if resolver else self.grounding.locate(obs.screenshot, target)
+            if state is not None:
+                state.grounding_calls.extend(copy.deepcopy(result.calls))
+                state.grounding_metadata = {"kind": "sampled", "mode": "point", "result_status": result.status,
+                                            **result.metadata}
+            coord = resolve_coords(result, obs.screenshot)
+            if coord is not None:
+                return coord
+            if not (result.status == "need_more" or result.reason.startswith(("Invalid grounding", "Invalid normalized"))):
+                break
+            feedback = "上次结果被拒绝：" + result.reason + "。请遵守坐标范围和JSON协议，目标不明确时返回ambiguous。"
+        return None
+
+    def _resolve(self, action: Action, obs: Observation, state=None) -> Action:
         spec = get_action_spec(action.action)
         if spec is None or spec.resolve == "none":
             return action
         if spec.resolve == "point":
-            gr = self.grounding.locate(obs.screenshot, str(action.args.get("target", "")))
-            coord = resolve_coords(gr)
+            coord = self._locate_point(str(action.args.get("target", "")), action, obs, state)
             # 保留 target 之外的参数（如 type 的 text），让「定位+聚焦」类动作能带上其余参数
             extra = dict(action.args)
-            if coord is None:
-                # UI-TARS 失败：尝试 OCR 文字定位兜底（对齐 AgentS3 的第二条 grounding 腿）
+            if coord is None and not getattr(self.grounding, "supports_nodes", False):
+                # 像素定位失败：尝试 OCR 文字定位兜底。
                 coord = self._ocr_fallback(obs.screenshot, str(action.args.get("target", "")))
             if coord is None:
                 # grounding 失败：不带可执行坐标，由执行器拒绝（空转），不做坐标钳制
@@ -768,9 +969,8 @@ class Pipeline:
             x, y = coord
             return Action(action.action, {"x": x, "y": y, **extra})
         if spec.resolve == "select":
-            gr = self.grounding.locate(obs.screenshot, str(action.args.get("target", "")))
-            coord = resolve_coords(gr)
-            if coord is None:
+            coord = self._locate_point(str(action.args.get("target", "")), action, obs, state)
+            if coord is None and not getattr(self.grounding, "supports_nodes", False):
                 coord = self._ocr_fallback(obs.screenshot, str(action.args.get("target", "")))
             if coord is None:
                 return Action(action.action, {"grounding_failed": True,
@@ -778,16 +978,15 @@ class Pipeline:
             x, y = coord
             return Action(action.action, {"x": x, "y": y, "option": action.args.get("option", "")})
         if spec.resolve == "drag":
-            g1 = self.grounding.locate(obs.screenshot, str(action.args.get("from_target", "")))
-            g2 = self.grounding.locate(obs.screenshot, str(action.args.get("to_target", "")))
-            c1, c2 = resolve_coords(g1), resolve_coords(g2)
+            c1 = self._locate_point(str(action.args.get("from_target", "")), action, obs, state)
+            c2 = self._locate_point(str(action.args.get("to_target", "")), action, obs, state)
             if c1 is None or c2 is None:
                 return Action(action.action, {"grounding_failed": True})
             return Action(action.action, {"x1": c1[0], "y1": c1[1], "x2": c2[0], "y2": c2[1]})
         return action
 
     def _ocr_fallback(self, screenshot, target: str):
-        """UI-TARS 定位失败时的 OCR 文字定位兜底（对齐 AgentS3 的 generate_text_coords）。
+        """像素定位失败时的 OCR 文字定位兜底。
 
         pytesseract OCR 提取屏幕文字表 → 用决策模型从文字表选最匹配 target 的 word
         → 返回 word bbox 中心坐标。OCR 依赖不可用 / 匹配失败时返回 None（不误伤）。

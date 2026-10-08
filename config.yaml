@@ -1,9 +1,11 @@
 # osworld_agent 示例配置
-# 换模型 = 改下面 model / grounding_model 的名字（对应 models.py 里的注册表）即可，不动代码。
+# model 与 grounding_model 独立配置。服务别名和实际模型 ID 在 config/model_registry.py 维护。
+# 这是旧 OSWorld 配置示例，不是 Windows 浏览器启动配置。
+# 新电脑使用 setup.cmd / run.cmd，模型参数修改仓库根目录 .env。
 
 # ---------------- 决策模型 ----------------
 model:
-  name: "9b"                 # 注册表里的名字，见 model/decision_model.py 的 MODEL_REGISTRY
+  name: "planning"           # 也可填实际部署的决策模型 ID
   url: "http://7.246.80.237:9028/v1"
   api_key: "EMPTY"
   temperature: 0.3
@@ -12,11 +14,26 @@ model:
 
 # ---------------- 视觉定位模型 ----------------
 grounding_model:
-  name: "ui_tars_7b"
-  url: "http://7.246.80.237:49999/v1"
+  name: "grounding"
+  protocol: "structured"
+  url: "http://7.246.80.237:9028/v1"
   api_key: "EMPTY"
   width: 1920
   height: 1080
+  thinking_style: "vllm"
+  policy_revision: ""
+  collect_logprobs: false
+  return_token_ids: false
+  context:
+    max_input_tokens: 8192
+    text_tokens: 2048
+    expanded_text_tokens: 4096
+    output_reserve: 256
+    candidate_limit: 20
+    expanded_candidate_limit: 40
+    max_calls: 2
+    tokenizer_path: ""
+    processor_path: ""
 
 # ---------------- 智能体循环 ----------------
 agent:
@@ -41,10 +58,12 @@ context:
   max_input_tokens: 12288
   output_reserve: 2048
   safety_margin: 1024
-  image_tokens: 2048       # 估计值；上线前按 Qwen processor 校准
+  image_tokens: 2048       # 估计值；上线前按对应模型的 processor 校准
   max_images: 2
   structured_max_images: 1 # 有 AX 信息时默认只带当前截图
   memory_tokens: 2200
   auxiliary_tokens: 1200
-  structure_tokens: 3500
-  tokenizer_path: ""      # 配本地 Qwen tokenizer 可替代保守的 UTF-8 字节计数
+  structure_tokens: 2000
+  structure_max_tokens: 3500
+  tokenizer_path: ""      # 配对应模型的本地 tokenizer 可替代保守的 UTF-8 字节计数
+  processor_path: ""      # 配与模型服务一致的processor，核算图像和聊天模板

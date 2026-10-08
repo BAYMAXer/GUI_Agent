@@ -4,18 +4,19 @@
 1. 改 config.yaml 里的 model.name（对应 MODEL_REGISTRY 的键）；
 2. 或在 MODEL_REGISTRY 里新增一项。
 
-所有模型都走 OpenAI 兼容 /chat/completions，所以 vLLM / OpenAI / Claude(兼容层) 都能接。
+所有模型都走 OpenAI 兼容 /chat/completions，支持本地或远程的兼容服务。
 vision 开启时（默认），每步把当前截图以 OpenAI vision 格式（image_url）塞进用户消息。
 """
 from __future__ import annotations
 
 import time
-import os
 import copy
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from ..config import ModelConfig
+from ..config.model_registry import MODEL_REGISTRY, resolve_model_name, environment_setting
 
 
 @dataclass
@@ -88,9 +89,13 @@ class ChatModel:
         from openai import OpenAI  # 延迟导入，避免非模型场景也依赖 openai
         import httpx
 
+        normalized = [self._to_message_dict(m) for m in messages]
+        self.last_call = {"messages": copy.deepcopy(normalized), "model": resolve_model_name(self.cfg.name),
+                          "policy_revision": self.cfg.policy_revision or None, "attempts": []}
+
         # trust_env=False：直连内网 endpoint，不走系统代理（同 grounding，避免 HIS 代理拦掉 7.x）
         if self._client is None:
-            key = os.environ.get(self.cfg.api_key_env, "") if self.cfg.api_key_env else self.cfg.api_key
+            key = environment_setting(self.cfg.api_key_env) if self.cfg.api_key_env else self.cfg.api_key
             if not key:
                 raise ValueError(f"Missing API key environment variable: {self.cfg.api_key_env}")
             self._client = OpenAI(
@@ -98,9 +103,6 @@ class ChatModel:
                 http_client=httpx.Client(trust_env=self.cfg.trust_env, timeout=self.cfg.timeout),
             )
         client = self._client
-        normalized = [self._to_message_dict(m) for m in messages]
-        self.last_call = {"messages": copy.deepcopy(normalized), "model": resolve_model_name(self.cfg.name),
-                          "policy_revision": self.cfg.policy_revision or None, "attempts": []}
         last_err: Optional[Exception] = None
         for attempt in range(retries + 1):
             started = time.perf_counter()
@@ -111,7 +113,7 @@ class ChatModel:
                     temperature=self.cfg.temperature,
                     max_tokens=self.cfg.max_tokens,
                 )
-                # 关闭 Qwen 思考模式：避免模型生成大段 chain-of-thought 陷入循环、不收敛到答案
+                # 按服务协议关闭思考模式，限制生成长度并尽快得到决策结果。
                 if self.disable_thinking and self.cfg.thinking_style == "vllm":
                     create_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
                 elif self.disable_thinking and self.cfg.thinking_style == "dashscope":
@@ -120,22 +122,38 @@ class ChatModel:
                     create_kwargs["response_format"] = {"type": "json_object"}
                 if self.cfg.collect_logprobs:
                     create_kwargs["logprobs"] = True
+                if self.cfg.return_token_ids:
+                    create_kwargs.setdefault("extra_body", {}).update(
+                        return_token_ids=True, return_tokens_as_token_ids=True)
                 generation = {k: v for k, v in create_kwargs.items() if k not in ("model", "messages")}
+                self.last_call["generation"] = copy.deepcopy(generation)
                 resp = client.chat.completions.create(**create_kwargs)
                 msg = resp.choices[0].message
                 content = getattr(msg, "content", "") or ""
                 lp = getattr(resp.choices[0], "logprobs", None)
+                lp_data = lp.model_dump() if lp else None
+                lp_content = (lp_data or {}).get("content") or []
+                ids = getattr(resp.choices[0], "token_ids", None)
+                token_lps = [p.get("logprob") for p in lp_content]
+                # Never retokenize an API response and pretend those are server-sampled IDs.
+                if ids is None and lp_content and all(re.fullmatch(r"token_id:\d+", p.get("token", "")) for p in lp_content):
+                    ids = [int(p["token"].split(":", 1)[1]) for p in lp_content]
+                if not ids or len(ids) != len(token_lps):
+                    ids, token_lps = None, None
                 self.last_call.update({"response_id": resp.id, "response_model": resp.model,
                     "response": content, "generation": generation,
                     "finish_reason": resp.choices[0].finish_reason,
                     "usage": resp.usage.model_dump() if resp.usage else None,
-                    "logprobs": lp.model_dump() if lp else None,
-                    "token_ids": None, "latency_ms": round((time.perf_counter()-started)*1000, 2)})
-                self.last_call["attempts"].append({"status": "ok", "latency_ms": self.last_call["latency_ms"]})
+                    "logprobs": lp_data, "token_ids": ids, "token_logprobs": token_lps,
+                    "prompt_token_ids": getattr(resp, "prompt_token_ids", None),
+                    "latency_ms": round((time.perf_counter()-started)*1000, 2)})
+                self.last_call["attempts"].append({"status": "ok", "latency_ms": self.last_call["latency_ms"],
+                    "generation": copy.deepcopy(generation), "response": content})
                 return content
             except Exception as exc:  # noqa: BLE001
                 last_err = exc
                 self.last_call["attempts"].append({"status": "error", "error_type": type(exc).__name__,
+                                                 "generation": copy.deepcopy(self.last_call.get("generation", {})),
                                                  "latency_ms": round((time.perf_counter()-started)*1000, 2)})
                 # 若因 extra_body 不被支持而报错，去掉 extra_body 重试一次
                 if self.disable_thinking and "extra_body" in str(exc).lower():
@@ -171,29 +189,6 @@ class ChatModel:
         if isinstance(m, dict):
             return {"role": m.get("role", "user"), "content": m.get("content", "")}
         return {"role": getattr(m, "role", "user"), "content": getattr(m, "content", "")}
-
-
-@dataclass
-class _ModelEntry:
-    """注册表里的一项：真实模型名 + 能力说明。"""
-    name: str
-    description: str
-
-
-# 决策模型注册表：key 是给人看的别名，换模型改 config 里的 name 即可。
-MODEL_REGISTRY: Dict[str, _ModelEntry] = {
-    "9b": _ModelEntry("Qwen3.5-9B", "9B 决策模型（vLLM @ 7.246.80.237:9028）"),
-    "27b": _ModelEntry("Qwen3.6-27B", "27B 决策模型（需要 api_key）"),
-    # 下面是要接外部 API 时再加的占位示例：
-    # "gpt-4o": _ModelEntry("gpt-4o", "OpenAI GPT-4o"),
-    # "claude": _ModelEntry("claude-3-7-sonnet", "Anthropic Claude"),
-}
-
-
-def resolve_model_name(alias: str) -> str:
-    """把别名转成真实模型名。"""
-    entry = MODEL_REGISTRY.get(alias)
-    return entry.name if entry else alias
 
 
 def build_decision_model(cfg: ModelConfig) -> ChatModel:

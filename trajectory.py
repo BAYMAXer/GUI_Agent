@@ -31,10 +31,11 @@ import json
 import base64
 import hashlib
 import copy
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-TRAJECTORY_VERSION = "2.0"
+TRAJECTORY_VERSION = "3.0"
 
 
 def _parse_action(action_repr) -> Dict[str, Any]:
@@ -90,8 +91,8 @@ def build_trajectory(
         # grounding 详情（本地 runner 才有）
         grounding = s.get("grounding")
         gs = grounding_map.get(step_no, [])
-        if gs:
-            g = gs[0]
+        if gs and not grounding:
+            g = next((g for g in reversed(gs) if g.get("coord") is not None), gs[-1])
             grounding = {
                 "target": g.get("query", ""),
                 "coord": g.get("coord"),
@@ -126,6 +127,10 @@ def build_trajectory(
             "policy_input": s.get("policy_input"),
             "policy_output": s.get("policy_output"),
             "decision_calls": s.get("decision_calls", []),
+            "model_calls": s.get("model_calls", []),
+            "grounding_metadata": s.get("grounding_metadata", {}),
+            "grounding_labels": s.get("grounding_labels", {}),
+            "offline_grounding_labels": s.get("offline_grounding_labels", []),
             "prompt_metadata": s.get("prompt_metadata", {}),
             "routing": s.get("routing", {}),
             "resolved_action": s.get("resolved_action"),
@@ -185,7 +190,7 @@ def dump_trajectory(path: str, trajectory: Dict[str, Any]) -> None:
     output.write_text(json.dumps(packed, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def iter_sft_records(trajectory, require_success=True):
+def iter_sft_records(trajectory, require_success=True, actor_role="decision", include_offline_labels=False):
     """Same exporter for every domain. No reconstruction, no hindsight in the prompt.
 
     Success means an independent evaluator passed; model self-reports aren't labels.
@@ -197,6 +202,23 @@ def iter_sft_records(trajectory, require_success=True):
     if require_success and not (outcome.get("evaluation_available") and outcome.get("score", 0) >= 1):
         return
     for step in trajectory.get("steps", []):
+        if actor_role != "decision":
+            if actor_role not in {"grounding", "all"}:
+                raise ValueError("actor_role must be decision, grounding or all")
+            calls = [c for c in step.get("model_calls", []) if c.get("actor_role") == "grounding"]
+            if include_offline_labels and step.get("execution_info", {}).get("status") == "executed":
+                calls += step.get("offline_grounding_labels", [])
+            for call in calls:
+                if (not call.get("messages") or not call.get("response") or call.get("finish_reason") == "length"
+                        or not (call.get("valid_action") or call.get("result_status") == "need_more")):
+                    continue
+                yield {"prompt": copy.deepcopy(call["messages"]),
+                       "completion": [{"role": "assistant", "content": call["response"]}],
+                       "task_id": trajectory["task"]["id"], "step": step["step"],
+                       "actor_role": "grounding", "provenance": call.get("provenance", "sampled"),
+                       "loss_scope": "completion_only", "schema_version": TRAJECTORY_VERSION}
+            if actor_role != "all":
+                continue
         if not step.get("trainable"):
             continue
         calls = step.get("decision_calls") or []
@@ -205,6 +227,7 @@ def iter_sft_records(trajectory, require_success=True):
         yield {"prompt": copy.deepcopy(step["policy_input"]),
                "completion": [{"role": "assistant", "content": step["policy_output"]}],
                "task_id": trajectory["task"]["id"], "step": step["step"],
+               "actor_role": "decision", "provenance": "sampled",
                "loss_scope": "completion_only", "schema_version": TRAJECTORY_VERSION}
 
 
@@ -259,14 +282,21 @@ def import_external_episode(task_id, domain, instruction, records, *, source, sc
             "done": bool(record.get("terminated") or record.get("truncated")),
             "prompt_metadata": {"origin": "external", "source": source,
                                 "input_fidelity": "provided" if record.get("messages") else "missing"},
-            "decision_calls": record.get("decision_calls", [])})
+            "decision_calls": copy.deepcopy(record.get("decision_calls", [])),
+            "model_calls": copy.deepcopy(record.get("model_calls", [])),
+            "grounding_metadata": copy.deepcopy(record.get("grounding_metadata", {})),
+            "grounding_labels": copy.deepcopy(record.get("grounding_labels", {})),
+            "offline_grounding_labels": copy.deepcopy(record.get("offline_grounding_labels", [])),
+            "execution_info": copy.deepcopy(record.get("execution_info", {})),
+            "routing": copy.deepcopy(record.get("routing", {})),
+            "resolved_action": copy.deepcopy(record.get("resolved_action"))})
     trajectory = build_trajectory(task_id, domain, instruction, result)
     trajectory["outcome"]["reward_source"] = "external_dataset_label" if score is not None else "unavailable"
     trajectory["provenance"] = {"source": source, "policy": "external", "use_for_model_training": True}
     return trajectory
 
 
-def iter_on_policy_records(trajectory, policy_revision):
+def iter_on_policy_records(trajectory, policy_revision, actor_role="decision"):
     """Strict RL gate: missing behavior-policy statistics cannot be fabricated.
 
     Includes rejected format attempts. An API teacher's output is SFT data, not
@@ -280,18 +310,33 @@ def iter_on_policy_records(trajectory, policy_revision):
     if trajectory.get("provenance", {}).get("use_for_model_training") is False:
         raise ValueError("Test fixtures are not policy rollouts")
     samples = []
+    if actor_role not in {"decision", "grounding"}:
+        raise ValueError("RL export requires a single actor_role")
     for step in trajectory.get("steps", []):
-        calls = step.get("decision_calls", [])
+        calls = [c for c in step.get("model_calls", []) if c.get("actor_role") == actor_role]
+        if not calls and actor_role == "decision":
+            calls = step.get("decision_calls", [])  # v2/external compatibility
         if not calls:
+            if actor_role == "grounding":
+                continue  # A deterministic route did not sample this policy.
             raise ValueError("Missing decision call records")
         for attempt, call in enumerate(calls):
+            if not call.get("response") and call.get("error_type") and not call.get("token_ids"):
+                continue  # A transport failure did not sample the behavior policy.
+            if call.get("provenance", "sampled") != "sampled":
+                raise ValueError("Offline labels are not on-policy samples")
             ids, lp = call.get("token_ids"), call.get("token_logprobs")
-            if (call.get("policy_revision") != policy_revision or not ids or not lp or len(ids) != len(lp)):
+            if (call.get("policy_revision") != policy_revision or not ids or not lp or len(ids) != len(lp)
+                    or any(isinstance(i, bool) or not isinstance(i, int) or i < 0 for i in ids)
+                    or any(isinstance(p, bool) or not isinstance(p, (int, float)) or not math.isfinite(p) for p in lp)):
                 raise ValueError("Need matching policy_revision, completion token_ids and token_logprobs for every call")
             samples.append({"prompt": call["messages"], "completion": call["response"],
                 "token_ids": ids, "behavior_logprobs": lp, "step": step["step"], "attempt": attempt,
+                "actor_role": actor_role,
                 "valid_action": bool(call.get("valid_action")), "episode_reward": outcome["score"],
                 "step_reward": step.get("reward") if attempt == len(calls)-1 else None,
                 "terminated": step.get("terminated", False), "truncated": step.get("truncated", False),
                 "next_observation": step.get("next_observation")})
+    if actor_role == "grounding" and not samples:
+        raise ValueError("No sampled grounding calls; deterministic labels are SFT-only")
     yield from samples

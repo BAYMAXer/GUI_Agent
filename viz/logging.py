@@ -170,6 +170,23 @@ class LoggingGrounding:
     def __init__(self, inner):
         self.inner = inner
 
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    def resolve(self, request):
+        resolver = getattr(self.inner, "resolve", None)
+        if resolver is None:
+            return self.locate(request.screenshot, request.target)
+        started = time.time()
+        result = resolver(request)
+        _post({"kind": "model", "type": "grounding", "prompt": request.target,
+               "response": result.target_ref or str(result.point or [result.x, result.y]),
+               "step": _step[0], "elapsed": round(time.time() - started, 3), "ts": time.time()})
+        _groundings.append({"step": _step[0], "query": request.target,
+            "coord": [result.x, result.y] if result.status == "ok" and not result.target_ref else None,
+            "target_ref": result.target_ref, "status": result.status, "elapsed": round(time.time() - started, 3)})
+        return result
+
     def locate(self, screenshot, target: str):
         from osworld_agent.model.decision_model import encode_image
         url = encode_image(screenshot)

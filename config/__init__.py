@@ -9,6 +9,7 @@ import json
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, Optional
+from .model_registry import normalize_grounding_protocol
 
 
 # 注册表文件路径（相对本包，随包走，换机器也能找到）
@@ -32,19 +33,20 @@ def load_yaml(path: Path) -> Dict[str, Any]:
 @dataclass
 class ModelConfig:
     """决策模型的连接配置。"""
-    name: str = "9b"
+    name: str = "planning"
     url: str = "http://7.246.80.237:9028/v1"
     api_key: str = "EMPTY"
     temperature: float = 0.3
     max_tokens: int = 2048
     timeout: float = 180.0
     vision: bool = True              # 是否把截图喂给决策模型（纯文本模型设 false）
-    disable_thinking: bool = True    # 关闭 Qwen 思考模式（避免模型生成大段 chain-of-thought 陷入循环）
+    disable_thinking: bool = True    # 按服务协议关闭思考模式，限制额外生成开销
     api_key_env: str = ""
     thinking_style: str = "vllm"  # vllm / dashscope / none
     trust_env: bool = False
     collect_logprobs: bool = False
     policy_revision: str = ""  # RL 时必须填固定 checkpoint 标识
+    return_token_ids: bool = False  # vLLM 扩展，配合 logprobs 采集真实行为策略统计
 
 
 @dataclass
@@ -58,19 +60,51 @@ class ContextConfig:
     structured_max_images: int = 1
     memory_tokens: int = 2200
     auxiliary_tokens: int = 1200
-    structure_tokens: int = 3500
+    structure_tokens: int = 2000
+    structure_max_tokens: int = 3500
     tokenizer_path: str = ""  # 本地 tokenizer；不填则按 UTF-8 字节保守预算
+    processor_path: str = ""  # 本地多模态 processor，与服务端的图像预处理配置一致
+
+
+@dataclass
+class GroundingContextConfig:
+    context_window: int = 32768
+    max_input_tokens: int = 8192
+    text_tokens: int = 2048
+    expanded_text_tokens: int = 4096
+    output_reserve: int = 256
+    safety_margin: int = 512
+    image_tokens: int = 2048
+    candidate_limit: int = 20
+    expanded_candidate_limit: int = 40
+    max_calls: int = 2
+    tokenizer_path: str = ""
+    processor_path: str = ""
+    enable_crop: bool = True
 
 
 @dataclass
 class GroundingConfig:
     """视觉定位模型的连接配置。"""
-    name: str = "ui_tars_7b"
-    url: str = "http://7.246.80.237:49999/v1"
+    name: str = "grounding"
+    url: str = "http://7.246.80.237:9028/v1"
     api_key: str = "EMPTY"
     width: int = 1920
     height: int = 1080
     timeout: float = 180.0
+    protocol: str = "auto"  # auto / structured / pixel / normalized
+    api_key_env: str = ""
+    thinking_style: str = "vllm"
+    trust_env: bool = False
+    collect_logprobs: bool = False
+    policy_revision: str = ""
+    return_token_ids: bool = False
+    context: GroundingContextConfig = field(default_factory=GroundingContextConfig)
+
+    def __post_init__(self):
+        self.protocol = normalize_grounding_protocol(self.protocol)
+        if isinstance(self.context, dict):
+            self.context = GroundingContextConfig(**self.context)
 
 
 @dataclass

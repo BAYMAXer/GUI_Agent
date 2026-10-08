@@ -73,6 +73,7 @@ def test_gate_switches_and_drops_previous_snapshot(browser):
 
 
 def test_ax_failure_keeps_scene_but_disables_structure(browser, monkeypatch):
+    browser.session._cache_time = 0  # Force a real AX refresh rather than reusing a valid cached tree.
     original = browser.session._cdp.send
     def send(method, *args, **kwargs):
         if method == "Accessibility.getFullAXTree":

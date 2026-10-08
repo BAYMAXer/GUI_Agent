@@ -1,26 +1,96 @@
 """视觉定位模型（grounding）层：把「点搜索框」这种自然语言目标定位成坐标。
 
-决策模型不需要猜像素坐标，坐标由视觉定位模型（UI-TARS）给出。
+决策与定位使用独立模型；网页节点与普通 GUI 坐标共用请求和结果结构。
 """
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from typing import Dict, Optional, Tuple
+from dataclasses import dataclass, field, replace
+from typing import Any, Dict, Optional, Tuple
+import base64
+from io import BytesIO
+import math
+import copy
+import time
 
 from ..config import GroundingConfig
+from ..config.model_registry import GROUNDING_REGISTRY, resolve_model_name, resolve_grounding_protocol, environment_setting
+
+
+def screenshot_image(screenshot):
+    from PIL import Image
+    if isinstance(screenshot, Image.Image):
+        return screenshot
+    if isinstance(screenshot, bytes):
+        return Image.open(BytesIO(screenshot)).convert("RGB")
+    if isinstance(screenshot, str) and screenshot.startswith("data:"):
+        return Image.open(BytesIO(base64.b64decode(screenshot.split(",", 1)[1]))).convert("RGB")
+    if isinstance(screenshot, str):
+        return Image.open(screenshot).convert("RGB")
+    raise ValueError("A real screenshot is required for grounding")
+
+
+def capture_legacy_call(model, messages, generation, started, *, response=None, error=None, metadata=None):
+    """Record the actual legacy protocol without inventing sampled token IDs."""
+    call = {"actor_role": "grounding", "provenance": "sampled", "model": model,
+            "messages": copy.deepcopy(messages), "generation": copy.deepcopy(generation),
+            "policy_revision": None, "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+            "prompt_metadata": metadata or {}, "valid_action": False}
+    if response is not None:
+        choice = response.choices[0]
+        call.update(response=choice.message.content or "", finish_reason=choice.finish_reason,
+                    response_model=response.model, response_id=response.id,
+                    usage=response.usage.model_dump() if response.usage else None)
+    if error is not None:
+        call["error_type"] = type(error).__name__
+    return call
+
+
+@dataclass
+class GroundingRequest:
+    screenshot: Any
+    target: str
+    action: str = "click"
+    mode: str = "point"  # node / point; same envelope for desktop and browser
+    target_hint: dict = field(default_factory=dict)
+    candidates: list = field(default_factory=list)
+    snapshot_id: str = ""
+    ref_aliases: dict = field(default_factory=dict)
+    subgoal: str = ""
+    expanded: bool = False
+    roi: Optional[tuple] = None  # verified rectangle in the original screenshot's pixels
+    feedback: str = ""
 
 
 @dataclass
 class GroundingResult:
     """一次定位结果：中心坐标 + 置信度（可选）。"""
-    x: int
-    y: int
+    x: int = -1
+    y: int = -1
     confidence: float = 1.0
+    status: str = "ok"
+    target_ref: Optional[str] = None
+    point: Optional[tuple] = None  # normalized 0..1000 in the actual model input image
+    reason: str = ""
+    metadata: dict = field(default_factory=dict)
+    calls: list = field(default_factory=list)
+
+    def __post_init__(self):
+        if self.status == "ok" and not self.target_ref and (self.x < 0 or self.y < 0 or self.confidence <= 0):
+            self.status = "not_found"
 
 
 class Grounding(ABC):
-    """视觉定位接口。"""
+    """节点/视觉定位接口，旧 locate() 客户端仍可使用。"""
+
+    supports_nodes = False
+
+    def resolve(self, request: GroundingRequest) -> GroundingResult:
+        if request.mode == "node":
+            return GroundingResult(status="not_found", reason="This grounding protocol has no node-selection capability")
+        result = self.locate(request.screenshot, request.target)
+        result.calls = list(getattr(self, "last_calls", []))
+        return result
 
     @abstractmethod
     def locate(self, screenshot, target: str) -> GroundingResult:
@@ -28,11 +98,10 @@ class Grounding(ABC):
         raise NotImplementedError
 
 
-class UItarsGrounding(Grounding):
-    """UI-TARS 定位客户端。
+class PixelGrounding(Grounding):
+    """像素点定位客户端。
 
-    走 OpenAI 兼容端点。UI-TARS 的定位模式：输入截图 + 目标描述，
-    返回一个边界框，我们取框的中心作为点击坐标。
+    输入截图和目标描述，使用配置的坐标分辨率换算实际点击位置。
     """
 
     def __init__(self, url: str, api_key: str, model: str,
@@ -47,13 +116,19 @@ class UItarsGrounding(Grounding):
     def locate(self, screenshot, target: str) -> GroundingResult:
         """定位目标元素。
 
-        复用 adapters.uitars_grounding 的真实协议，持久化客户端连接。
+        复用 adapters.pixel_grounding 的真实协议，持久化客户端连接。
         """
-        from ..adapters.uitars_grounding import RealUItarsGrounding
+        from ..adapters.pixel_grounding import PixelGroundingClient
         if not hasattr(self, "_delegate"):
-            self._delegate = RealUItarsGrounding(self.url, self.api_key, self.model,
+            self._delegate = PixelGroundingClient(self.url, self.api_key, self.model,
                 self.width, self.height, timeout=self.timeout)
-        return self._delegate.locate(screenshot, target)
+        result = self._delegate.locate(screenshot, target)
+        self.last_calls = self._delegate.last_calls
+        return result
+
+    def close(self):
+        if hasattr(self, "_delegate"):
+            self._delegate.close()
 
 
 class NullGrounding(Grounding):
@@ -67,7 +142,7 @@ class NullGrounding(Grounding):
         return GroundingResult(x=-1, y=-1, confidence=0.0)
 
 
-def resolve_coords(gr: GroundingResult) -> Optional[Tuple[int, int]]:
+def resolve_coords(gr: GroundingResult, screenshot=None) -> Optional[Tuple[int, int]]:
     """把定位结果转成坐标；grounding 失败（置信度 0 或负坐标）时返回 None。
 
     注意：不要在这里把失败结果钳制成 (0,0)——那会让执行器"以为"定位成功而去点
@@ -75,10 +150,21 @@ def resolve_coords(gr: GroundingResult) -> Optional[Tuple[int, int]]:
     """
     if gr is None:
         return None
+    if gr.status != "ok" or gr.target_ref:
+        return None
     if gr.confidence is not None and gr.confidence <= 0:
         return None
-    if gr.x < 0 or gr.y < 0:
+    if (isinstance(gr.x, bool) or isinstance(gr.y, bool) or
+            not isinstance(gr.x, (int, float)) or not isinstance(gr.y, (int, float)) or
+            not math.isfinite(gr.x) or not math.isfinite(gr.y) or gr.x < 0 or gr.y < 0):
         return None
+    if screenshot is not None:
+        try:
+            w, h = screenshot_image(screenshot).size
+            if gr.x >= w or gr.y >= h:
+                return None
+        except (ValueError, OSError):
+            return None
     return int(gr.x), int(gr.y)
 
 
@@ -100,22 +186,16 @@ def mark_coordinate(screenshot, x: int, y: int, radius: int = 14, color: str = "
     return img
 
 
-@dataclass
-class _ModelEntry:
-    """注册表里的一项：真实模型名 + 能力说明。"""
-    name: str
-    description: str
-
-
-# 视觉定位模型注册表
-GROUNDING_REGISTRY: Dict[str, _ModelEntry] = {
-    "ui_tars_7b": _ModelEntry("UI-TARS-1.5-7B", "UI-TARS 定位模型（vLLM @ 49999）"),
-}
-
-
 def build_grounding_model(cfg: GroundingConfig) -> Grounding:
-    """根据配置构造视觉定位客户端。"""
-    entry = GROUNDING_REGISTRY.get(cfg.name)
-    real_name = entry.name if entry else cfg.name
-    return UItarsGrounding(url=cfg.url, api_key=cfg.api_key, model=real_name,
+    """按配置的协议构造定位客户端，不根据模型名称写业务分支。"""
+    protocol = resolve_grounding_protocol(cfg.name, cfg.protocol)
+    cfg = replace(cfg, name=resolve_model_name(cfg.name), protocol=protocol)
+    if protocol == "structured":
+        from ..adapters.grounding import GroundingClient
+        return GroundingClient(cfg)
+    key = environment_setting(cfg.api_key_env) if cfg.api_key_env else cfg.api_key
+    if protocol == "normalized":
+        from ..adapters.normalized_grounding import NormalizedGroundingClient
+        return NormalizedGroundingClient(cfg.url, key, cfg.name, cfg.width, cfg.height, timeout=cfg.timeout)
+    return PixelGrounding(url=cfg.url, api_key=key, model=cfg.name,
                            width=cfg.width, height=cfg.height, timeout=cfg.timeout)

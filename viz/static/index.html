@@ -405,10 +405,10 @@
           <div id="run-vision-desc" class="experiment-note"></div>
           <div class="run-row"><label>关注说明</label><input id="run-roi-note" placeholder="例如：重点观察工具栏"></div>
           <canvas id="run-roi-canvas" class="roi-canvas" width="960" height="540" title="拖拽画出关注框"></canvas>
-          <div class="experiment-note">仅手动 ROI / 注意框启用画框。框的坐标会随实验快照保存；不会改变 UI-TARS grounding 的完整屏幕坐标。</div>
+          <div class="experiment-note">仅手动 ROI / 注意框启用画框。框的坐标会随实验快照保存；不会改变 grounding 的完整屏幕坐标。</div>
           <div class="run-sec-title">模型后端</div>
           <div class="run-row"><label>动作适配</label><select id="run-backend"><option value="native">原生 AgentS3</option><option value="scalecua">ScaleCUA SFT</option></select></div>
-          <div class="run-row"><label>ScaleCUA 坐标</label><select id="run-scalecua-mode"><option value="semantic">语义 + UI-TARS（推荐）</option><option value="direct">直接坐标（实验性）</option></select></div>
+          <div class="run-row"><label>ScaleCUA 坐标</label><select id="run-scalecua-mode"><option value="semantic">语义 + grounding（推荐）</option><option value="direct">直接坐标（实验性）</option></select></div>
         </div>
 
         <div class="run-panel">
@@ -448,14 +448,14 @@
         <section class="debug-panel">
           <h3>1. 导入真实调用</h3>
           <div class="debug-warning">重放只调用模型接口，<b>不会</b>启动任务、连接 VM 或执行任何 GUI 动作。</div>
-          <label>调用类型</label><select id="debug-type"><option value="">全部</option><option value="decision">决策模型</option><option value="grounding">Grounding / UI-TARS</option></select>
+          <label>调用类型</label><select id="debug-type"><option value="">全部</option><option value="decision">决策模型</option><option value="grounding">Grounding</option></select>
           <label>已捕获调用（新运行后可用）</label><select id="debug-snapshot"><option value="">加载中…</option></select>
           <button id="debug-load" class="debug-btn secondary">载入完整真实输入</button>
           <label>Provider</label><select id="debug-provider"><option value="vllm">vllm</option><option value="openai">openai</option><option value="anthropic">anthropic</option><option value="gemini">gemini</option><option value="open_router">open_router</option></select>
           <label>模型</label><input id="debug-model" list="debug-model-options">
           <datalist id="debug-model-options">
-            <option value="Qwen3.5-9B"></option>
-            <option value="UI-TARS-1.5-7B"></option>
+            <option value="planning"></option>
+            <option value="grounding"></option>
           </datalist>
           <label>模型 URL</label><input id="debug-url">
           <label>API Key（仅本次请求，不保存）</label><input id="debug-key" type="password" placeholder="留空使用进程环境变量">
@@ -494,7 +494,7 @@
           <select id="chat-model-type" title="模型类型（切换会自动填充对应默认模型）">
             <option value="decision">决策模型</option>
             <option value="grounding">Grounding 模型</option>
-            <option value="ui-venus2">UI-Venus-2 Grounding</option>
+            <option value="normalized">归一化定位</option>
           </select>
           <select id="chat-provider">
             <option value="vllm">vllm</option>
@@ -505,8 +505,8 @@
           </select>
           <input id="chat-model" list="chat-model-options" placeholder="模型名">
           <datalist id="chat-model-options">
-            <option value="Qwen3.5-9B"></option>
-            <option value="UI-TARS-1.5-7B"></option>
+            <option value="planning"></option>
+            <option value="grounding"></option>
           </datalist>
           <input id="chat-url" placeholder="模型 URL">
           <input id="chat-key" type="password" placeholder="API Key">
@@ -526,9 +526,9 @@
       <div class="chat-modal-box">
         <h3>新建会话</h3>
         <p>请选择初始模型类型（顶部可随时切换）</p>
-        <button class="chat-new-type" data-type="decision">决策模型<br><small>Qwen3.5-9B</small></button>
-        <button class="chat-new-type" data-type="grounding">Grounding 模型<br><small>UI-TARS-1.5-7B</small></button>
-        <button class="chat-new-type" data-type="ui-venus2">UI-Venus-2 Grounding<br><small>UI-Venus-2-9B</small></button>
+        <button class="chat-new-type" data-type="decision">决策模型<br><small>planning</small></button>
+        <button class="chat-new-type" data-type="grounding">Grounding 模型<br><small>grounding</small></button>
+        <button class="chat-new-type" data-type="normalized">归一化定位<br><small>normalized coordinates</small></button>
         <button id="chat-new-cancel">取消</button>
       </div>
     </div>
@@ -971,13 +971,13 @@ function updateStrategyHelp() {
 function updatePromptTokens() {
   const el = document.getElementById('run-prompt-tokens');
   const prompt = document.getElementById('run-system-prompt').value;
-  const model = document.getElementById('run-model').value || 'Qwen3.5-9B';
-  const url = document.getElementById('run-model-url').value || 'http://7.246.80.237:9028/v1';
+  const model = document.getElementById('run-model').value || 'planning';
+  const url = document.getElementById('run-model-url').value;
   if (!prompt) { el.textContent = 'System prompt token：0'; return; }
   el.textContent = 'System prompt token：计算中…';
   clearTimeout(window.promptTokenTimer);
   window.promptTokenTimer = setTimeout(() => fetch('/experiments/token-count?model=' + encodeURIComponent(model) + '&model_url=' + encodeURIComponent(url) + '&text=' + encodeURIComponent(prompt))
-    .then(r => r.json()).then(d => { el.textContent = d.ok ? `System prompt token：${Number(d.tokens).toLocaleString()}（Qwen tokenizer）` : 'System prompt token：当前服务不可计算'; })
+    .then(r => r.json()).then(d => { el.textContent = d.ok ? `System prompt token：${Number(d.tokens).toLocaleString()}（当前服务 tokenizer）` : 'System prompt token：当前服务不可计算'; })
     .catch(() => { el.textContent = 'System prompt token：当前服务不可计算'; }), 350);
 }
 function loadDefaultPrompt() {
@@ -1068,7 +1068,7 @@ document.getElementById('run-domain').addEventListener('change', updateTaskOptio
 
 /* ===== 模型预设：下拉选择，URL/key 自动填充（从后端 /model-presets 读取） ===== */
 let MODEL_PRESETS = { decision_models: [], grounding_models: [] };
-let currentGroundType = 'ui-tars';
+let currentGroundType = 'auto';
 function applyDecisionPreset() {
   const name = document.getElementById('run-model').value;
   const m = (MODEL_PRESETS.decision_models || []).find(x => x.name === name);
@@ -1084,7 +1084,7 @@ function applyGroundPreset() {
   if (m) {
     document.getElementById('run-ground-url').value = m.url || '';
     document.getElementById('run-ground-apikey').value = m.api_key || 'EMPTY';
-    currentGroundType = m.type || 'ui-tars';
+    currentGroundType = m.type || 'auto';
   }
 }
 function loadModelPresets() {
@@ -1096,6 +1096,7 @@ function loadModelPresets() {
     gm.innerHTML = (MODEL_PRESETS.grounding_models || []).map(m => '<option value="' + esc(m.name) + '">' + esc(m.name) + '</option>').join('');
     applyDecisionPreset();
     applyGroundPreset();
+    applyConfiguredModelDefaults();
   }).catch(() => {});
 }
 document.getElementById('run-model').addEventListener('change', applyDecisionPreset);
@@ -1535,8 +1536,8 @@ function renderDebugImage(messages, coordinate) {
   host.innerHTML = '<img src="' + esc(url) + '" title="提交给模型的最后一张图片">' + marker;
 }
 const DEBUG_DEFAULTS = {
-  decision:  { provider: 'vllm', model: 'Qwen3.5-9B', url: 'http://7.246.80.237:9028/v1', key: 'EMPTY' },
-  grounding: { provider: 'vllm', model: 'UI-TARS-1.5-7B', url: 'http://7.246.80.237:49999/v1', key: 'EMPTY' },
+  decision:  { provider: 'vllm', model: 'planning', url: '', key: 'EMPTY' },
+  grounding: { provider: 'vllm', model: 'grounding_pixel', url: '', key: 'EMPTY' },
 };
 function applyDebugDefaults(type) {
   const d = DEBUG_DEFAULTS[type];
@@ -1605,24 +1606,51 @@ let chatSeq = 1;
 let chatLoaded = false;
 
 const CHAT_DEFAULTS = {
-  decision:  { type: 'decision', label: '决策模型', provider: 'vllm', model: 'Qwen3.5-9B', url: 'http://7.246.80.237:9028/v1', key: 'EMPTY' },
-  grounding: { type: 'grounding', label: 'Grounding 模型', provider: 'vllm', model: 'UI-TARS-1.5-7B', url: 'http://7.246.80.237:49999/v1', key: 'EMPTY' },
-  'ui-venus2': { type: 'ui-venus2', label: 'UI-Venus-2 Grounding', provider: 'vllm', model: 'UI-Venus-2-9B', url: 'http://7.246.80.189:8001/v1', key: 'EMPTY' },
+  decision:  { type: 'decision', label: '决策模型', provider: 'vllm', model: 'planning', url: '', key: 'EMPTY' },
+  grounding: { type: 'grounding', label: 'Grounding 模型', provider: 'vllm', model: 'grounding_pixel', url: '', key: 'EMPTY', protocol: 'pixel' },
+  normalized: { type: 'normalized', label: '归一化定位', provider: 'vllm', model: 'grounding_normalized', url: '', key: 'EMPTY', protocol: 'normalized' },
 };
 const CHAT_LS_KEY = 'agent_chat_sessions_v1';
 
-function curSession() { return chatSessions.find(s => s.id === chatActiveId) || null; }
-function loadChatSessions() {
-  try { const raw = localStorage.getItem(CHAT_LS_KEY); if (raw) chatSessions = JSON.parse(raw) || []; } catch (e) {}
-  // 兼容旧数据 / 缺配置的会话：用对应类型的默认模型补上，避免用户每次手动输入
+function applyConfiguredModelDefaults() {
+  const planning = (MODEL_PRESETS.decision_models || [])[0];
+  const grounders = MODEL_PRESETS.grounding_models || [];
+  const choices = {
+    decision: planning,
+    grounding: grounders.find(m => m.type === 'pixel') || grounders[0],
+    normalized: grounders.find(m => m.type === 'normalized'),
+  };
+  for (const [type, model] of Object.entries(choices)) {
+    if (!model) continue;
+    const settings = {provider: model.provider || 'vllm', model: model.name, url: model.url || '',
+                      key: model.api_key || 'EMPTY', protocol: model.type || 'auto'};
+    Object.assign(CHAT_DEFAULTS[type], settings);
+    if (DEBUG_DEFAULTS[type]) Object.assign(DEBUG_DEFAULTS[type], settings);
+  }
+  const options = [...new Set([planning?.name, ...grounders.map(m => m.name)].filter(Boolean))]
+    .map(name => '<option value="' + esc(name) + '"></option>').join('');
+  for (const id of ['debug-model-options', 'chat-model-options']) document.getElementById(id).innerHTML = options;
+  normalizeChatSessions();
+  if (chatLoaded) { renderChatSidebar(); syncSettingsFromSession(); renderChat(); }
+}
+function normalizeChatSessions() {
   for (const s of chatSessions) {
+    const legacyProtocol = (MODEL_PRESETS.protocol_aliases || {})[s.type];
+    if (legacyProtocol) s.type = legacyProtocol === 'normalized' ? 'normalized' : 'grounding';
     const d = CHAT_DEFAULTS[s.type] || CHAT_DEFAULTS.decision;
     if (!s.provider) s.provider = d.provider;
     if (!s.model) s.model = d.model;
     if (!s.url) s.url = d.url;
     if (!s.key) s.key = d.key;
     if (!s.label) s.label = d.label;
+    if (!s.protocol) s.protocol = (MODEL_PRESETS.grounding_models || []).find(m => m.name === s.model)?.type || d.protocol || 'auto';
   }
+}
+function curSession() { return chatSessions.find(s => s.id === chatActiveId) || null; }
+function loadChatSessions() {
+  try { const raw = localStorage.getItem(CHAT_LS_KEY); if (raw) chatSessions = JSON.parse(raw) || []; } catch (e) {}
+  // 兼容旧数据 / 缺配置的会话：用对应类型的默认模型补上，避免用户每次手动输入
+  normalizeChatSessions();
   if (chatSessions.length) chatActiveId = chatSessions[chatSessions.length - 1].id;
   chatSeq = chatSessions.length + 1;
 }
@@ -1638,7 +1666,7 @@ function saveChatSessions() {
 function newChatSession(type) {
   const d = CHAT_DEFAULTS[type] || CHAT_DEFAULTS.decision;
   const s = { id: 's' + Date.now() + '_' + chatSeq, name: '会话 ' + chatSeq++, type: d.type, label: d.label,
-              provider: d.provider, model: d.model, url: d.url, key: d.key, messages: [] };
+              provider: d.provider, model: d.model, url: d.url, key: d.key, protocol: d.protocol || 'auto', messages: [] };
   chatSessions.push(s); chatActiveId = s.id;
   saveChatSessions(); renderChatSidebar(); syncSettingsFromSession(); renderChat();
 }
@@ -1734,8 +1762,8 @@ function chatMsgHtml(m, coord) {
   const isUser = m.role === 'user';
   const text = chatTextOf(m);
   const imgs = chatImgsOf(m);
-  const isGrounding = curSession() && (curSession().type === 'grounding' || curSession().type === 'ui-venus2');
-  const isNorm1000 = curSession() && curSession().type === 'ui-venus2';
+  const isGrounding = curSession() && (curSession().type === 'grounding' || curSession().type === 'normalized');
+  const isNorm1000 = curSession() && curSession().protocol !== 'pixel';
   let imgHtml = '';
   if (imgs.length) {
     imgHtml = '<div class="chat-imgs">' + imgs.map((u, k) => {
@@ -1792,7 +1820,7 @@ function sendChat() {
   box.scrollTop = box.scrollHeight;
   chatSending = true; document.getElementById('chat-send').disabled = true;
   const payload = {
-    engine: { engine_type: s.provider, model: s.model, base_url: s.url },
+    engine: { engine_type: s.provider, model: s.model, base_url: s.url, grounding_protocol: s.protocol || 'auto' },
     messages: s.messages,
     generation: { temperature: 0.0, max_new_tokens: 4096 },
     api_key: s.key || undefined,
@@ -1829,6 +1857,7 @@ document.getElementById('chat-model-type').addEventListener('change', e => {
   if (s) {
     s.type = d.type; s.label = d.label;
     s.provider = d.provider; s.model = d.model; s.url = d.url; s.key = d.key;
+    s.protocol = d.protocol || 'auto';
     saveChatSessions(); renderChatSidebar();
   }
   document.getElementById('chat-provider').value = d.provider;

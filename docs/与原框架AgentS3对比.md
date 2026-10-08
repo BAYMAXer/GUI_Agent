@@ -18,7 +18,7 @@
 | 维度 | 原框架 | 我们 |
 |---|---|---|
 | 核心循环 | `agents/grounding.py` ACI 类 + worker | `pipeline.py` 单文件 Pipeline |
-| grounding | `generate_coords`（UI-TARS 单点）+ `generate_text_coords`（OCR 文本跨度）| `RealUItarsGrounding`（同协议）+ `_ocr_fallback`（失败兜底）|
+| grounding | `generate_coords`（UI-TARS 单点）+ `generate_text_coords`（OCR 文本跨度）| `PixelGroundingClient`（同协议）+ `_ocr_fallback`（失败兜底）|
 | code_agent | `LMMAgent` + view(含 PDF→PNG) + note + **summary agent** | 简化版 ChatModel + view + note |
 | 记忆 | procedural_memory(静态规则) + note/recall | structured_memory(状态/事件/事实/失败/**action_history**) |
 | 环境 | 直接 DesktopEnv | `Environment` 抽象 + VMware/Docker 适配器 |

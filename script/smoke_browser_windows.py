@@ -1,4 +1,4 @@
-"""Deterministic integration smoke, explicitly NOT a Qwen performance test."""
+"""Deterministic integration smoke, explicitly NOT a model performance test."""
 import argparse
 import json
 import platform
@@ -17,6 +17,7 @@ from osworld_agent.script.browser_fixture import ScriptedPolicy, CountingGroundi
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--channel", choices=["auto", "chromium", "chrome", "msedge"], default=None)
+    parser.add_argument("--output", default=str(root / "artifacts" / "windows-smoke"))
     args = parser.parse_args()
     fixture = root / "tests" / "fixtures" / "browser_task.html"
     env = BrowserEnvironment(fixture.resolve().as_uri(), evaluator=evaluate_customer, channel=args.channel)
@@ -25,7 +26,7 @@ def main():
     try:
         result = Agent(ScriptedPolicy(), ground, env, max_steps=6).run(
             "Set Customer name to Acme Ltd, Plan to Enterprise, enable notifications, and Save customer.")
-        output = root / "artifacts" / "windows-smoke"
+        output = Path(args.output)
         output.mkdir(parents=True, exist_ok=True)
         trajectory = build_trajectory("windows-fixture-scripted", "browser", result.task, result)
         trajectory["provenance"] = {"policy": "scripted_test_double", "use_for_model_training": False}

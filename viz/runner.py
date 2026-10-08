@@ -17,12 +17,12 @@ _pkg = os.path.dirname(_here)
 if _pkg not in sys.path:
     sys.path.insert(0, _pkg)
 
-from osworld_agent.config import ModelConfig  # noqa: E402
+from osworld_agent.config import ModelConfig, GroundingConfig  # noqa: E402
+from osworld_agent.config.model_registry import GROUNDING_PROTOCOLS, normalize_grounding_protocol, environment_setting  # noqa: E402
+from osworld_agent.model.grounding import build_grounding_model  # noqa: E402
 from osworld_agent.model import ChatModel  # noqa: E402
 from osworld_agent.agent import Agent  # noqa: E402
 from osworld_agent.adapters.vmware_env import VMwareEnvironment  # noqa: E402
-from osworld_agent.adapters.uitars_grounding import RealUItarsGrounding  # noqa: E402
-from osworld_agent.adapters.uivenus2_grounding import UIVenus2Grounding  # noqa: E402
 from osworld_agent.adapters.task_loader import load_task_config  # noqa: E402
 from osworld_agent.viz.logging import (  # noqa: E402
     LoggingChatModel, LoggingGrounding, log_status, set_results_dir,
@@ -30,7 +30,7 @@ from osworld_agent.viz.logging import (  # noqa: E402
 )
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task-id", required=True)
     parser.add_argument("--examples-dir", required=True)
@@ -39,18 +39,24 @@ def main() -> None:
     parser.add_argument("--cache-dir", default=None, help="OSWorld 缓存目录（复用原框架的 cache，避免重复下载）")
     parser.add_argument("--vm-path", default=None)
     parser.add_argument("--headless", action="store_true")
-    parser.add_argument("--model", default="Qwen3.5-9B")
-    parser.add_argument("--model-url", default="http://7.246.80.237:9028/v1")
-    parser.add_argument("--model-api-key", default="EMPTY")
-    parser.add_argument("--ground-model", default="UI-TARS-1.5-7B")
-    parser.add_argument("--ground-url", default="http://7.246.80.237:49999/v1")
-    parser.add_argument("--ground-api-key", default="EMPTY")
-    parser.add_argument("--ground-type", default="ui-tars", choices=["ui-tars", "ui-venus2"],
-                        help="grounding 模型类型：ui-tars / ui-venus2")
+    parser.add_argument("--model", default=environment_setting("PLAN_MODEL", "planning"))
+    parser.add_argument("--model-url", default=environment_setting("PLAN_API_URL"))
+    parser.add_argument("--model-api-key", default=None, help="Legacy GUI option; prefer PLAN_API_KEY")
+    parser.add_argument("--ground-model", default=environment_setting("GROUNDING_MODEL", "grounding"))
+    parser.add_argument("--ground-url", default=environment_setting("GROUNDING_API_URL"))
+    parser.add_argument("--ground-api-key", default=None, help="Legacy GUI option; prefer GROUNDING_API_KEY")
+    parser.add_argument("--ground-type", default=os.getenv("GROUNDING_PROTOCOL", "auto"), type=normalize_grounding_protocol, choices=GROUNDING_PROTOCOLS,
+                        help="grounding 协议：auto / structured / pixel / normalized")
     parser.add_argument("--max-steps", type=int, default=20)
     parser.add_argument("--screen-width", type=int, default=1920)
     parser.add_argument("--screen-height", type=int, default=1080)
     args = parser.parse_args()
+    if not args.model_url or not args.ground_url:
+        parser.error("Configure PLAN_API_URL and GROUNDING_API_URL, or provide model/ground URLs.")
+    plan_key = args.model_api_key or environment_setting("PLAN_API_KEY")
+    ground_key = args.ground_api_key or environment_setting("GROUNDING_API_KEY")
+    if not plan_key or not ground_key:
+        parser.error("Configure PLAN_API_KEY and GROUNDING_API_KEY; explicitly set EMPTY for unauthenticated services.")
 
     results_root = os.getenv("AGENTS_RESULTS_DIR",
                              os.path.join(_pkg, "viz", "runs"))
@@ -79,17 +85,14 @@ def main() -> None:
 
     # 2) 决策模型（包装，记录调用）
     model = LoggingChatModel(ChatModel(ModelConfig(
-        name=args.model, url=args.model_url, api_key=args.model_api_key)))
+        name=args.model, url=args.model_url, api_key=plan_key,
+        thinking_style=environment_setting("PLAN_THINKING_STYLE", "none"))))
 
     # 3) grounding（包装，记录定位）
-    if args.ground_type == "ui-venus2":
-        _ground = UIVenus2Grounding(
-            url=args.ground_url, api_key=args.ground_api_key, model=args.ground_model,
-            width=args.screen_width, height=args.screen_height)
-    else:
-        _ground = RealUItarsGrounding(
-            url=args.ground_url, api_key=args.ground_api_key, model=args.ground_model,
-            width=args.screen_width, height=args.screen_height)
+    _ground = build_grounding_model(GroundingConfig(name=args.ground_model, url=args.ground_url,
+        api_key=ground_key, protocol=args.ground_type,
+        thinking_style=os.getenv("GROUNDING_THINKING_STYLE", "none"),
+        width=args.screen_width, height=args.screen_height))
     grounding = LoggingGrounding(_ground)
 
     # 4) 环境（传入决策模型用于 type 落点校验）
@@ -150,13 +153,16 @@ def main() -> None:
         decisions=collected["decisions"], groundings=collected["groundings"],
     )
     dump_trajectory(os.path.join(results_dir, "trajectory.json"), trajectory)
+    from pathlib import Path
+    (Path(results_dir) / "report.json").write_text(json.dumps(trajectory["outcome"], ensure_ascii=False, indent=2), encoding="utf-8")
 
     log_status({
         "event": "task_end", "example_id": example_id,
         "result": result.score, "steps": result.steps, "success": result.success,
     })
     print(f"done: score={result.score} steps={result.steps} answer={result.final_answer!r}")
+    return 0 if result.success else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

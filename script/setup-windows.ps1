@@ -1,68 +1,75 @@
 param(
     [ValidateSet('browser', 'desktop')][string]$Profile = 'browser',
     [string]$Python = '',
-    [switch]$SkipSmoke
+    [switch]$SkipSmoke,
+    [switch]$RecreateVenv
 )
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
 try {
+    if (-not [Environment]::Is64BitOperatingSystem -or -not [Environment]::Is64BitProcess -or
+        $env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64') {
+        throw 'This setup targets Windows x64. Use a 64-bit PowerShell process on an x64 machine.'
+    }
     Set-Location -LiteralPath $AgentRoot
     if (-not (Test-Path -LiteralPath '.env')) { Copy-Item -LiteralPath '.env.example' -Destination '.env' }
     if (-not (Test-Path -LiteralPath 'config\model_presets.local.yaml')) {
         Copy-Item -LiteralPath 'config\model_presets.yaml' -Destination 'config\model_presets.local.yaml'
     }
     Import-AgentEnv
-    if ($Profile -eq 'desktop') {
-        if (-not $env:OSWORLD_DESKTOP_ENV_PATH -or
-            -not (Test-Path -LiteralPath (Join-Path $env:OSWORLD_DESKTOP_ENV_PATH 'desktop_env') -PathType Container)) {
-            throw 'Desktop mode requires an external OSWorld checkout. Set OSWORLD_DESKTOP_ENV_PATH in .env; see README.md.'
-        }
+    if ($Profile -eq 'desktop' -and (-not $env:OSWORLD_DESKTOP_ENV_PATH -or
+        -not (Test-Path -LiteralPath (Join-Path $env:OSWORLD_DESKTOP_ENV_PATH 'desktop_env') -PathType Container))) {
+        throw 'Desktop mode requires an external OSWorld checkout. Configure .env; see docs/WINDOWS_AGENT_RUNBOOK.md.'
     }
-    $venvReady = $false
-    if (Test-Path -LiteralPath $AgentPython) {
-        $venvReady = Test-AgentPython $AgentPython 'import sys; sys.exit(0 if sys.version_info[:2] == (3, 12) and sys.maxsize > 2**32 else 1)'
-        if (-not $venvReady) { throw 'The existing .venv is unusable. Rename it to .venv.old and rerun setup; never copy a venv between computers.' }
-    }
-    if (-not $venvReady) {
-        if (-not $Python) { $Python = Find-AgentPython }
-        if (-not $Python) {
-            if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
-                throw 'Install Python 3.12 (64-bit) from python.org, then run setup.cmd again. WinGet is unavailable.'
+    $venvDir = [IO.Path]::GetFullPath((Join-Path $AgentRoot '.venv'))
+    if (Test-Path -LiteralPath $venvDir) {
+        if ($RecreateVenv) {
+            $backupDir = [IO.Path]::GetFullPath((Join-Path $AgentRoot ('.venv.backup-' + [Guid]::NewGuid().ToString('N'))))
+            $workspacePrefix = [IO.Path]::GetFullPath($AgentRoot).TrimEnd('\') + '\'
+            if (-not $venvDir.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+                -not $backupDir.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+                (Get-Item -LiteralPath $venvDir).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+                throw 'Refusing to move a venv outside this checkout or a linked venv.'
             }
-            Write-Host '[setup] Installing Python 3.12 for this Windows user...'
-            Invoke-AgentCommand 'winget.exe' @('install', '--id', 'Python.Python.3.12', '--exact', '--source', 'winget',
-                '--scope', 'user', '--silent', '--accept-package-agreements', '--accept-source-agreements')
-            $Python = Find-AgentPython
-            if (-not $Python) { throw 'Python was installed but could not be found. Rerun setup.cmd or pass -Python C:\path\python.exe.' }
+            Move-Item -LiteralPath $venvDir -Destination $backupDir
+            Write-Host "[setup] Preserved old venv at $backupDir"
+        } else {
+            $valid = Test-AgentPython $AgentPython 'import sys; sys.exit(0 if sys.version_info[:2] == (3,12) and sys.maxsize > 2**32 else 1)'
+            $cfg = Join-Path $venvDir 'pyvenv.cfg'
+            $shared = (Test-Path -LiteralPath $cfg) -and ((Get-Content -LiteralPath $cfg -Raw) -match '(?im)^include-system-site-packages\s*=\s*true')
+            if (-not $valid -or $shared) { throw 'Existing .venv is unusable or shares system packages. Run setup.cmd -RecreateVenv to preserve it and create an isolated environment.' }
         }
-        Invoke-AgentCommand $Python @('-c', 'import sys; sys.exit(0 if sys.version_info[:2] == (3, 12) and sys.maxsize > 2**32 else 1)')
-        Write-Host '[setup] Creating isolated .venv...'
-        Invoke-AgentCommand $Python @('-m', 'venv', (Join-Path $AgentRoot '.venv'))
     }
-    Write-Host '[setup] Installing the agent and dependencies...'
-    Invoke-AgentCommand $AgentPython @('-m', 'pip', 'install', '--upgrade', 'pip')
+    $AgentUv = Install-AgentUv
+    Invoke-AgentCommand $AgentUv @('--version')
+    if (-not $Python) { $Python = Get-AgentManagedPython }
+    $syncArgs = @('sync', '--locked', '--python', $Python, '--no-python-downloads')
+    # Retain separately installed OSWorld dependencies in an existing desktop venv.
+    if ($Profile -eq 'desktop') { $syncArgs += '--inexact' }
+    Write-Host '[setup] uv sync: Python 3.12, locked dependencies and editable project...'
+    Invoke-AgentCommand $AgentUv $syncArgs
+    if (-not (Test-AgentPython $AgentPython 'import sys; sys.exit(0 if sys.version_info[:2] == (3,12) and sys.maxsize > 2**32 else 1)')) {
+        throw 'Expected an x64 Python 3.12 environment.'
+    }
     if ($Profile -eq 'desktop') {
-        $desktopRequirements = $env:OSWORLD_DESKTOP_REQUIREMENTS
-        if (-not $desktopRequirements) { $desktopRequirements = Join-Path $env:OSWORLD_DESKTOP_ENV_PATH 'requirements.txt' }
-        if (-not (Test-Path -LiteralPath $desktopRequirements -PathType Leaf)) {
-            throw 'External OSWorld requirements.txt is missing. Set OSWORLD_DESKTOP_REQUIREMENTS to its Windows dependency file.'
-        }
-        # Keep any relative paths in upstream requirements relative to that checkout.
+        $requirements = $env:OSWORLD_DESKTOP_REQUIREMENTS
+        if (-not $requirements) { $requirements = Join-Path $env:OSWORLD_DESKTOP_ENV_PATH 'requirements.txt' }
+        if (-not (Test-Path -LiteralPath $requirements -PathType Leaf)) { throw 'External Windows requirements file is missing; set OSWORLD_DESKTOP_REQUIREMENTS.' }
+        $constraints = Join-Path $AgentRoot '.tools\desktop-constraints.txt'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $constraints) -Force | Out-Null
+        Invoke-AgentCommand $AgentUv @('export', '--locked', '--no-emit-project', '--no-hashes', '--no-dev', '--output-file', $constraints)
         Push-Location -LiteralPath $env:OSWORLD_DESKTOP_ENV_PATH
-        try { Invoke-AgentCommand $AgentPython @('-m', 'pip', 'install', '-r', $desktopRequirements) }
+        try { Invoke-AgentCommand $AgentUv @('pip', 'install', '--python', $AgentPython, '-r', $requirements, '-c', $constraints) }
         finally { Pop-Location }
     }
-    Invoke-AgentCommand $AgentPython @('-m', 'pip', 'install', '-r',
-        (Join-Path $AgentRoot 'requirements-windows.lock.txt'), '-e', $AgentRoot)
-    Invoke-AgentCommand $AgentPython @('-m', 'pip', 'check')
-    Write-Host '[setup] Installing Playwright Chromium...'
-    Invoke-AgentCommand $AgentPython @('-m', 'playwright', 'install', 'chromium')
+    Invoke-AgentCommand $AgentUv @('pip', 'check', '--python', $AgentPython)
+    Invoke-AgentModule 'playwright' @('install', 'chromium')
     if (-not $SkipSmoke) {
-        Invoke-AgentCommand $AgentPython @('-m', 'osworld_agent.script.smoke_browser_windows', '--channel', $env:OSWORLD_BROWSER_CHANNEL)
+        Invoke-AgentModule 'osworld_agent.script.smoke_browser_windows' @('--channel', $env:OSWORLD_BROWSER_CHANNEL)
     }
-    if ($Profile -eq 'desktop') {
-        Invoke-AgentCommand $AgentPython @('-m', 'osworld_agent.script.doctor', '--desktop')
-    }
-    Write-Host '[setup] Ready. Edit .env for your model, then run run.cmd. For a credential-free smoke: run.cmd -Mode smoke'
+    if ($Profile -eq 'desktop') { Invoke-AgentModule 'osworld_agent.script.doctor' @('--desktop') }
+    @{fingerprint = Get-AgentEnvironmentFingerprint; profile = $Profile} | ConvertTo-Json |
+        Set-Content -LiteralPath (Join-Path $venvDir '.osworld-uv-ready.json') -Encoding ASCII
+    Write-Host '[setup] Ready. Configure .env, then run run.cmd -Mode acceptance. See docs/WINDOWS_AGENT_RUNBOOK.md.'
     exit 0
 } catch {
     Write-Host ("[setup] ERROR: " + $_.Exception.Message) -ForegroundColor Red

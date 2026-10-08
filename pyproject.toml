@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68,<85"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "osworld-agent"
+version = "0.1.0"
+description = "OSWorld GUI agent with a standalone Windows browser runner"
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+packages = ["osworld_agent", "osworld_agent.adapters", "osworld_agent.config", "osworld_agent.memory", "osworld_agent.model", "osworld_agent.rl", "osworld_agent.script", "osworld_agent.skills", "osworld_agent.viz"]
+package-dir = {osworld_agent = "."}
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements-browser.txt"]}
+
+[tool.setuptools.package-data]
+osworld_agent = ["config.yaml", "tests/fixtures/*.html"]
+"osworld_agent.config" = ["action.yaml", "skills.yaml", "model_presets.yaml"]
+"osworld_agent.viz" = ["static/*.html"]

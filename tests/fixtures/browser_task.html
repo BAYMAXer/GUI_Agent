@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Customer settings fixture</title>
+<style>body{font:18px sans-serif;max-width:850px;margin:40px auto;background:#f5f7fa;color:#243047}label{display:block;margin:20px 0}input,select,button{font:inherit;padding:10px}section{background:white;padding:24px;border-radius:12px}#status{color:#157347}</style>
+<h1>Customer settings</h1><p>Choose the Enterprise plan, enable notifications, and save the customer record.</p>
+<section><label>Customer name <input id="customer" value="Old Customer"></label>
+<label>Plan <select id="plan"><option>Basic</option><option>Enterprise</option></select></label>
+<label><input id="notify" type="checkbox"> Enable notifications</label>
+<button id="save">Save customer</button><button disabled>Unavailable action</button>
+<p id="status" role="status">Unsaved changes</p></section>
+<script>
+document.querySelector('#save').addEventListener('click',()=>{
+ const record={customer:document.querySelector('#customer').value,plan:document.querySelector('#plan').value,notify:document.querySelector('#notify').checked};
+ localStorage.setItem('customer-record',JSON.stringify(record));
+ document.querySelector('#status').textContent=`Saved ${record.customer} | ${record.plan} | notifications ${record.notify?'on':'off'}`;
+ window.saveCount=(window.saveCount||0)+1;
+});
+</script></html>

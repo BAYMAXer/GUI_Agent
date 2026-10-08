@@ -118,7 +118,7 @@ class AgentConfig:
 
 @dataclass
 class EnvConfig:
-    """环境（OSWorld）的配置。"""
+    """目标环境配置；browser 是 Windows 的可选增强能力。"""
     provider: str = "osworld"
     os: str = "linux"               # 目标机操作系统：linux / mac / windows（决定终端命令的 shell）
     vm_path: str = "/data/osworld-agent-s/vm/uploaded/Ubuntu.qcow2"
@@ -126,6 +126,8 @@ class EnvConfig:
     headless: bool = False
     screen_width: int = 1920
     screen_height: int = 1080
+    artifact_dir: str = "artifacts/computer"
+    browser: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

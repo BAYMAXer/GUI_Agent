@@ -67,7 +67,7 @@ function Get-AgentManagedPython {
     # minor-version junctions. Preserve any unrelated user Python installation.
     $ErrorActionPreference = 'Continue'
     $version = (Get-Content -LiteralPath (Join-Path $AgentRoot '.python-version') -Raw).Trim()
-    $candidate = & $AgentUv python find --managed-python --no-python-downloads $version 2>$null
+    $candidate = & $AgentUv python find --system --no-project --managed-python --no-python-downloads $version 2>$null
     if ($LASTEXITCODE -eq 0 -and $candidate -and
         (Test-AgentPython $candidate 'import sys; sys.exit(0 if sys.version_info[:2] == (3,12) and sys.maxsize > 2**32 else 1)')) {
         return [string]$candidate
@@ -78,7 +78,7 @@ function Get-AgentManagedPython {
     if ($installExit -ne 0 -and (($output | Out-String) -notmatch 'Missing expected target directory for Python minor version link')) {
         throw "uv Python installation failed (exit $installExit)."
     }
-    $candidate = & $AgentUv python find --managed-python --no-python-downloads $version 2>$null
+    $candidate = & $AgentUv python find --system --no-project --managed-python --no-python-downloads $version 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $candidate -or
         -not (Test-AgentPython $candidate 'import sys; sys.exit(0 if sys.version_info[:2] == (3,12) and sys.maxsize > 2**32 else 1)')) {
         throw 'Managed Python is unavailable. See the Python troubleshooting section in docs/WINDOWS_AGENT_RUNBOOK.md.'
@@ -102,6 +102,7 @@ function Invoke-AgentModule {
 }
 
 function Import-AgentEnv {
+    param([switch]$IgnoreComputerSession)
     $envFile = Join-Path $AgentRoot '.env'
     if (Test-Path -LiteralPath $envFile) {
         foreach ($line in Get-Content -LiteralPath $envFile -Encoding UTF8) {
@@ -136,10 +137,17 @@ function Import-AgentEnv {
             }
         }
     }
+    if ($IgnoreComputerSession) {
+        # Fixtures own fresh browser state; never inherit a user's logged-in session.
+        foreach ($envName in @('COMPUTER_BROWSER_PROFILE_DIR', 'COMPUTER_CDP_ENDPOINT', 'COMPUTER_DOWNLOAD_DIR')) {
+            [Environment]::SetEnvironmentVariable($envName, $null, 'Process')
+        }
+    }
     foreach ($envName in @('OSWORLD_DESKTOP_ENV_PATH', 'OSWORLD_EXAMPLES_DIR',
             'OSWORLD_VM_PATH', 'OSWORLD_DESKTOP_REQUIREMENTS', 'OSWORLD_MODEL_PRESETS', 'AGENTS_RESULTS_DIR',
             'OSWORLD_RUNNER_PYTHON', 'PLAN_TOKENIZER_PATH', 'PLAN_PROCESSOR_PATH',
-            'GROUNDING_TOKENIZER_PATH', 'GROUNDING_PROCESSOR_PATH')) {
+            'GROUNDING_TOKENIZER_PATH', 'GROUNDING_PROCESSOR_PATH', 'COMPUTER_BROWSER_EXECUTABLE',
+            'COMPUTER_BROWSER_PROFILE_DIR', 'COMPUTER_DOWNLOAD_DIR')) {
         $envValue = [Environment]::GetEnvironmentVariable($envName, 'Process')
         if ($envValue -and -not [IO.Path]::IsPathRooted($envValue)) {
             [Environment]::SetEnvironmentVariable($envName, [IO.Path]::GetFullPath((Join-Path $AgentRoot $envValue)), 'Process')
@@ -157,6 +165,7 @@ function Import-AgentEnv {
     if (-not $env:AGENTS_VIZ_PORT) { $env:AGENTS_VIZ_PORT = '8088' }
     if (-not $env:OSWORLD_SNAPSHOT_NAME) { $env:OSWORLD_SNAPSHOT_NAME = 'init_state' }
     if (-not $env:OSWORLD_BROWSER_CHANNEL) { $env:OSWORLD_BROWSER_CHANNEL = 'auto' }
+    if (-not $env:COMPUTER_BROWSER_CHANNEL) { $env:COMPUTER_BROWSER_CHANNEL = 'auto' }
     # OSWorld must inherit vmrun's location even when VMware did not update PATH.
     foreach ($installRoot in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
         if (-not $installRoot) { continue }

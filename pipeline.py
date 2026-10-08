@@ -73,7 +73,7 @@ class StepState:
     terminal_result: str = ""
     code_agent_result: str = ""
     page_source: str = ""
-    page_source_scope: tuple = ("", "")
+    page_source_scope: tuple = ("", "", "")
     memory_text: str = ""
     # 视觉记忆
     screenshot_history: List[Any] = field(default_factory=list)
@@ -161,10 +161,15 @@ class Pipeline:
                 result.screenshots[step_no] = state.obs.screenshot
             messages = self.build_input(state)
             before = self._observation_record(state.obs, f"o_{step_no}")
+            if getattr(self.env, "fresh_observations", False):
+                previous = next((t for t in reversed(result.trajectory) if t.get("next_observation")), None)
+                if previous:
+                    previous["post_action_observation"] = previous["next_observation"]
+                    previous["next_observation"] = copy.deepcopy(before)
             decision = self.decide(messages)
             for call in decision.calls:
                 call["actor_role"] = "decision"
-                call["provenance"] = "sampled"
+                call.setdefault("provenance", "sampled")
                 call["prompt_metadata"] = copy.deepcopy(state.prompt_metadata)
             result.steps = step_no
             if decision.action is None:
@@ -182,7 +187,8 @@ class Pipeline:
                 fresh = self._fresh_observation()
                 if fresh is not None:
                     state.obs = fresh
-                result.trajectory[-1]["next_observation"] = self._observation_record(state.obs, f"o_{step_no+1}")
+                next_id = f"after_a_{step_no}" if getattr(self.env, "fresh_observations", False) else f"o_{step_no+1}"
+                result.trajectory[-1]["next_observation"] = self._observation_record(state.obs, next_id)
                 continue
             ground_started = time.perf_counter()
             action = self.ground(decision.action, state)
@@ -194,8 +200,9 @@ class Pipeline:
             execute_ms = (time.perf_counter() - execute_started) * 1000
             state, should_break = self.postprocess(step_no, decision, execution, state, result)
             entry = next(t for t in reversed(result.trajectory) if t.get("action_id") == f"a_{step_no}")
+            next_id = f"after_a_{step_no}" if getattr(self.env, "fresh_observations", False) else f"o_{step_no+1}"
             entry.update({"observation": before,
-                "next_observation": self._observation_record(state.obs, f"o_{step_no+1}"),
+                "next_observation": self._observation_record(state.obs, next_id),
                 "policy_input": copy.deepcopy(decision.calls[-1]["messages"] if decision.calls else messages),
                 "policy_output": decision.raw, "decision_calls": decision.calls,
                 "model_calls": decision.calls + copy.deepcopy(state.grounding_calls),
@@ -242,6 +249,8 @@ class Pipeline:
     def preprocess(self, state: StepState) -> StepState:
         if state.obs is None:
             state.obs = self.env.reset(state.task)
+        elif getattr(self.env, "fresh_observations", False):
+            state.obs = self._fresh_observation() or state.obs
         state.screenshot_history.append(state.obs.screenshot)
         if len(state.screenshot_history) > 3:
             state.screenshot_history = state.screenshot_history[-3:]
@@ -250,11 +259,11 @@ class Pipeline:
 
     def build_input(self, state: StepState) -> List[dict]:
         scene = observation_scene(state.obs)
-        scope = (scene.get("page_id", ""), scene.get("url", ""))
+        scope = (scene.get("page_id", ""), scene.get("url", ""), scene.get("snapshot_id", ""))
         page_source = state.page_source if (scene.get("browser_use") == 1 and scene.get("structure_available") and scope[0]
                                            and scope == state.page_source_scope) else ""
         state.page_source = ""  # 一次性返回后清空，避免每步重复塞大段源码
-        state.page_source_scope = ("", "")
+        state.page_source_scope = ("", "", "")
         blocks = list(browser_context(state.obs))
         subgoal = state.memory.task_state.get("current_subgoal", "") if state.memory else ""
         session = getattr(self.env, "browser_session", None)
@@ -278,7 +287,7 @@ class Pipeline:
         auxiliary = json.dumps({"skills": state.skill_results, "terminal": state.terminal_result,
                                "code_agent": state.code_agent_result, "page_source": page_source}, ensure_ascii=False)
         user_text, images, metadata = self.compiler.compile(system=self.system_prompt, task=state.task,
-            memory=state.memory_text, blocks=blocks, auxiliary=auxiliary,
+            memory=self._memory_prompt_data(state), blocks=blocks, auxiliary=auxiliary,
             images=self._build_images(state) if getattr(self.model, "vision", True) else [], subgoal=subgoal)
         state.prompt_metadata = metadata
         state.prompt_metadata["scene"] = copy.deepcopy(scene)
@@ -469,6 +478,12 @@ class Pipeline:
             return Execution(kind="env", outcome="定位失败，未执行；请细化目标或使用inspect_page。" +
                              str((state.route or {}).get("reason", "")),
                 executed="rejected", info={"status": "rejected", "dispatched": False})
+        preflight = getattr(self.env, "preflight", None)
+        rejected = preflight(action, state.obs) if preflight else None
+        if rejected:
+            state.route = rejected
+            return Execution(kind="env", outcome=rejected["reason"], executed="rejected",
+                             info={"status": "rejected", "dispatched": False})
         if state.route and state.route.get("channel") == "browser_dom":
             try:
                 routed = self.env.execute_routed(action, state.route)
@@ -541,7 +556,7 @@ class Pipeline:
                 action = Action(name, {**action.args, "target_ref": ref})
             source = self.env.get_source_for_action(action)
             state.page_source = source[:12000] + ("\n...(源码过长已截断)" if len(source) > 12000 else "")
-            state.page_source_scope = (scene.get("page_id", ""), scene.get("url", ""))
+            state.page_source_scope = (scene.get("page_id", ""), scene.get("url", ""), scene.get("snapshot_id", ""))
             return Execution(kind="browser", executed="获取页面源码",
                              outcome="页面源码将在下一步返回")
 
@@ -724,9 +739,16 @@ class Pipeline:
         )
 
     def _build_memory_text(self, state: StepState) -> str:
-        control = {"control_state": state.memory.control_state, "expected_effect": state.memory.expected_effect,
-                   "recent_events": state.memory.recent_events, "failures": state.memory.failure_memory}
-        return self._program_info_text(state) + "\n" + json.dumps(control, ensure_ascii=False) + "\n" + state.memory.to_text()
+        return self.compiler.memory(self._memory_prompt_data(state), self.compiler.config.memory_tokens)
+
+    def _memory_prompt_data(self, state: StepState) -> dict:
+        data = state.memory.to_prompt_data() if state.memory else {"current_subgoal": "", "known_facts": {}}
+        data["program"] = {
+            "step_id": state.step_id, "last_action": state.last_action, "last_target": state.last_target,
+            "grounding_coordinate": list(state.last_grounding_coord) if state.last_grounding_coord else None,
+            "execution_status": state.execution_status, "failure_count": state.failure_count,
+        }
+        return data
 
     def _program_info_text(self, state: StepState) -> str:
         coord = state.last_grounding_coord
@@ -818,7 +840,7 @@ class Pipeline:
     def _verify_finish(self, state: StepState, answer: str) -> Tuple[bool, str]:
         """Finish Verifier：逐条核对任务是否完成。返回 (是否确认, 说明)。"""
         text = (f"你是一个任务完成度核对器。\n\n## 任务\n{state.task}\n\n"
-                f"## 已完成的工作（结构化记忆）\n{self.compiler.clip(self._build_memory_text(state), 2000)}\n\n"
+                f"## 已完成的工作（结构化记忆）\n{self.compiler.memory(self._memory_prompt_data(state), 2000)}\n\n"
                 f"## 模型声称的答案\n{answer}\n\n"
                 f"请逐条核对任务要求是否都已完成且答案正确。\n"
                 f"全部满足：只输出 CONFIRM\n否则：输出 REJECT 并说明还缺什么")
@@ -896,6 +918,9 @@ class Pipeline:
         if name not in ACTION_REGISTRY:
             return (f"未知动作类型「{name}」。可选动作：{', '.join(ACTION_REGISTRY)}；"
                     f"可选技能：{', '.join(enabled_skills())}")
+        capability = ACTION_REGISTRY[name].capability
+        if capability and capability not in getattr(self.env, "capabilities", set()):
+            return f"当前环境没有动作 {name} 所需的能力 {capability}"
         return validate_action(action)
 
     def _browser_roi(self, obs, refs):

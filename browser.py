@@ -62,6 +62,20 @@ class BrowserSession:
         self._objects = {}
         self._object_group = "osworld-" + uuid.uuid4().hex
         self._watch_key = "__osworld_" + uuid.uuid4().hex
+        self._focus_probes = {}
+
+    def _real_page_focus(self, page):
+        # CDP attachment may emulate focus. Desktop routing must inspect actual page focus.
+        if self._browser is not None and not self._managed_page:
+            if page not in self._focus_probes:
+                probe = page.context.new_cdp_session(page)
+                try:
+                    probe.send("Emulation.setFocusEmulationEnabled", {"enabled": False})
+                except Exception:
+                    probe.detach()
+                    raise BrowserActionError("Real browser focus could not be established")
+                self._focus_probes[page] = probe
+        return page.evaluate("document.hasFocus() && document.visibilityState === 'visible'")
 
     def _foreground(self):
         if self.foreground_probe:
@@ -76,7 +90,9 @@ class BrowserSession:
         current = self._foreground()
         return (current.available and current.is_browser and not current.native_ui
                 and (not before or not before.window_id or before.window_id == current.window_id)
-                and (not before or not before.process_id or before.process_id == current.process_id))
+                and (not before or not before.process_id or before.process_id == current.process_id)
+                and (not before or before.generation == current.generation)
+                and (not before or not before.focus_id or before.focus_id == current.focus_id))
 
     def _attach(self):
         if self.page is None or self._browser is not None:
@@ -96,7 +112,7 @@ class BrowserSession:
                     if not page.url.startswith(("http://", "https://", "file://")):
                         continue
                     try:
-                        if page.evaluate("document.hasFocus() && document.visibilityState === 'visible'"):
+                        if self._real_page_focus(page):
                             candidates.append(page)
                     except Exception:
                         continue
@@ -169,7 +185,7 @@ class BrowserSession:
             self.scene = scene_from_foreground(foreground)
             self.scene.reason = "active_page_unconfirmed"
             raise
-        if not self._managed_page and not self.page.evaluate("document.hasFocus() && document.visibilityState === 'visible'"):
+        if not self._managed_page and not self._real_page_focus(self.page):
             self.invalidate()
             self.scene = scene_from_foreground(foreground)
             self.scene.mode = "browser_native"
@@ -555,6 +571,12 @@ class BrowserSession:
 
     def close(self):
         self.invalidate()
+        for probe in self._focus_probes.values():
+            try:
+                probe.detach()
+            except Exception:
+                pass
+        self._focus_probes.clear()
         if self._playwright is not None:
             self._playwright.stop()  # disconnect; do not close the user's existing browser
             self._playwright = self._browser = None

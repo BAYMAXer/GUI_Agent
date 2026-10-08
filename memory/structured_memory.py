@@ -91,6 +91,28 @@ class StructuredMemory:
             line += f" → {outcome}"
         self.action_history.append(line)
 
+    def to_prompt_data(self) -> Dict[str, Any]:
+        """Prioritize durable task state; rendering must not alter stored memory."""
+        return {
+            "current_subgoal": self.task_state.get("current_subgoal", ""),
+            "known_facts": dict(self.known_facts),
+            "control": {
+                "control_state": self.control_state, "action_status": self.action_status,
+                "stall_count": self.stall_count, "expected_effect": self.expected_effect,
+                "observed_effect": self.observed_effect,
+                "failed_strategies": self.failed_strategies[-MAX_FAILURES:],
+                "forbidden_repeats": self.forbidden_repeats[-MAX_FAILURES:],
+            },
+            "task_state": {
+                "goal": self.task_state.get("goal", ""),
+                "completed": self.task_state.get("completed", [])[-4:],
+                "pending": self.task_state.get("pending", [])[-4:],
+            },
+            "failures": self.failure_memory[-MAX_FAILURES:],
+            "recent_events": self.recent_events[-MAX_RECENT_EVENTS:],
+            "action_history": self.action_history[-MAX_RECENT_EVENTS:],
+        }
+
     # ---- 渲染给模型 ----
     def to_text(self) -> str:
         ts = self.task_state

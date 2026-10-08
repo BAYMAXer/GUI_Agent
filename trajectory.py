@@ -124,6 +124,7 @@ def build_trajectory(
             "valid_action": s.get("valid_action", bool(s.get("action"))),
             "observation": s.get("observation") or {"id": f"o_{step_no}", "context": [], "screenshot": None},
             "next_observation": s.get("next_observation"),
+            "post_action_observation": s.get("post_action_observation"),
             "policy_input": s.get("policy_input"),
             "policy_output": s.get("policy_output"),
             "decision_calls": s.get("decision_calls", []),
@@ -149,7 +150,7 @@ def build_trajectory(
         },
         "outcome": {
             "success": bool(getattr(result, "success", False)),
-            "score": float(getattr(result, "score", 0.0)),
+            "score": float(getattr(result, "score", 0.0)) if getattr(result, "evaluation_available", False) else None,
             "num_steps": int(getattr(result, "steps", 0)),
             "final_answer": getattr(result, "final_answer", ""),
             "evaluation_available": bool(getattr(result, "evaluation_available", False)),

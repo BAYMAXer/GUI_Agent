@@ -1,8 +1,9 @@
 param(
-    [ValidateSet('browser', 'desktop')][string]$Profile = 'browser',
+    [ValidateSet('browser', 'computer', 'desktop')][string]$Profile = 'browser',
     [string]$Python = '',
     [switch]$SkipSmoke,
-    [switch]$RecreateVenv
+    [switch]$RecreateVenv,
+    [switch]$IsolatedComputerBrowser
 )
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
 try {
@@ -15,7 +16,7 @@ try {
     if (-not (Test-Path -LiteralPath 'config\model_presets.local.yaml')) {
         Copy-Item -LiteralPath 'config\model_presets.yaml' -Destination 'config\model_presets.local.yaml'
     }
-    Import-AgentEnv
+    Import-AgentEnv -IgnoreComputerSession:$IsolatedComputerBrowser
     if ($Profile -eq 'desktop' -and (-not $env:OSWORLD_DESKTOP_ENV_PATH -or
         -not (Test-Path -LiteralPath (Join-Path $env:OSWORLD_DESKTOP_ENV_PATH 'desktop_env') -PathType Container))) {
         throw 'Desktop mode requires an external OSWorld checkout. Configure .env; see docs/WINDOWS_AGENT_RUNBOOK.md.'
@@ -62,14 +63,28 @@ try {
         finally { Pop-Location }
     }
     Invoke-AgentCommand $AgentUv @('pip', 'check', '--python', $AgentPython)
-    Invoke-AgentModule 'playwright' @('install', 'chromium')
-    if (-not $SkipSmoke) {
+    $needsChromium = $Profile -ne 'computer' -or
+        ($env:COMPUTER_BROWSER_CHANNEL -eq 'chromium' -and
+         -not $env:COMPUTER_BROWSER_EXECUTABLE -and -not $env:COMPUTER_CDP_ENDPOINT)
+    if ($needsChromium) { Invoke-AgentModule 'playwright' @('install', 'chromium') }
+    if ($Profile -ne 'computer' -and -not $SkipSmoke) {
         Invoke-AgentModule 'osworld_agent.script.smoke_browser_windows' @('--channel', $env:OSWORLD_BROWSER_CHANNEL)
     }
     if ($Profile -eq 'desktop') { Invoke-AgentModule 'osworld_agent.script.doctor' @('--desktop') }
+    if ($Profile -eq 'computer') { Invoke-AgentModule 'osworld_agent.script.doctor' @('--computer') }
     @{fingerprint = Get-AgentEnvironmentFingerprint; profile = $Profile} | ConvertTo-Json |
         Set-Content -LiteralPath (Join-Path $venvDir '.osworld-uv-ready.json') -Encoding ASCII
-    Write-Host '[setup] Ready. Configure .env, then run run.cmd -Mode acceptance. See docs/WINDOWS_AGENT_RUNBOOK.md.'
+    switch ($Profile) {
+        'computer' {
+            Write-Host '[setup] Ready. Desktop checks do not inject input. Run run.cmd -Mode computer-smoke for the scripted fixture; configure .env, then run run.cmd -Mode computer-acceptance for model acceptance.'
+        }
+        'desktop' {
+            Write-Host '[setup] Ready. Configure .env, then run run.cmd -Mode vm -TaskId <task-id>, or run.cmd -Mode viz. See docs/WINDOWS_AGENT_RUNBOOK.md.'
+        }
+        default {
+            Write-Host '[setup] Ready. Configure .env, then run run.cmd -Mode acceptance. See docs/WINDOWS_AGENT_RUNBOOK.md.'
+        }
+    }
     exit 0
 } catch {
     Write-Host ("[setup] ERROR: " + $_.Exception.Message) -ForegroundColor Red

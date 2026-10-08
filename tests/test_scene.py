@@ -158,7 +158,7 @@ def test_source_is_bound_to_page_and_delivered_once(browser):
     pipeline = Pipeline(model=ChatModel(ModelConfig()), grounding=NullGrounding(), env=browser, system_prompt="JSON")
     scene = observation.info["scene"]
     state = StepState(task="Inspect", obs=observation, screenshot_history=[observation.screenshot],
-        page_source="SOURCE_SENTINEL", page_source_scope=(scene["page_id"], scene["url"]))
+        page_source="SOURCE_SENTINEL", page_source_scope=(scene["page_id"], scene["url"], scene["snapshot_id"]))
     assert "SOURCE_SENTINEL" in text_of(pipeline.build_input(state))
     assert "SOURCE_SENTINEL" not in text_of(pipeline.build_input(state))
     state.page_source, state.page_source_scope = "OTHER_PAGE_SOURCE", ("other-page", scene["url"])

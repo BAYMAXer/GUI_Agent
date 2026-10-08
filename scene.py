@@ -21,6 +21,8 @@ class Foreground:
     is_browser: bool = False
     native_ui: bool = False
     reason: str = "foreground_unavailable"
+    focus_id: str = ""
+    generation: int = 0
 
     @classmethod
     def from_raw(cls, raw):
@@ -36,6 +38,7 @@ class Foreground:
         return cls(available=True, window_id=str(raw.get("window_id", "")),
             process_id=int(raw.get("process_id", 0)), process_name=process, window_class=klass,
             is_browser=name in _BROWSERS, native_ui=native,
+            focus_id=str(raw.get("focus_id", "")), generation=int(raw.get("generation", 0)),
             reason="native_ui" if native else ("browser_foreground" if name in _BROWSERS else "desktop_foreground"))
 
 
@@ -118,6 +121,7 @@ def _probe_windows_raw():
     got_gui = user32.GetGUIThreadInfo(tid, ctypes.byref(gui))
     return {"available": True, "window_id": str(hwnd), "process_id": pid.value,
             "process_name": image.value, "window_class": klass.value,
+            "focus_id": str(gui.hwndFocus or "") if got_gui else "",
             "menu_active": bool(got_gui and gui.flags & (0x4 | 0x8 | 0x10))}
 
 

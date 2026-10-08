@@ -14,6 +14,7 @@
 #                   point  —— target 描述 -> 一个坐标 (x, y)
 #                   select —— target 描述 -> 坐标 (x, y) + 保留 option
 #                   drag   —— from_target / to_target -> 两个坐标 (x1,y1,x2,y2)
+#   capability:   可选环境能力；没有该能力的环境不向模型提供此动作
 # =============================================================
 
 actions:
@@ -64,6 +65,13 @@ actions:
     description: "浏览器打开网址（url）"
     kind: env
     resolve: none
+
+  open_browser:
+    params: []
+    description: "创建或激活当前任务的专用浏览器，可选 url。网页任务优先使用此动作；普通桌面操作照常使用截图。结构不可用时继续视觉操作。"
+    kind: env
+    resolve: none
+    capability: browser_runtime
 
   select:
     params: [target, option]

@@ -32,12 +32,15 @@ class Agent:
         self.context_config = context_config
         self.os_name = getattr(env, "os_name", "linux")
         allowed = getattr(env, "supported_actions", None)
+        from .actions import ACTION_REGISTRY
+        capabilities = getattr(env, "capabilities", set())
+        registry = {k: v for k, v in ACTION_REGISTRY.items()
+                    if (allowed is None or k in allowed) and (not v.capability or v.capability in capabilities)}
         if allowed is not None:
-            from .actions import ACTION_REGISTRY
             self.system_prompt = build_system_prompt(os_name=self.os_name,
-                action_registry={k: v for k, v in ACTION_REGISTRY.items() if k in allowed}, skill_registry={})
+                action_registry=registry, skill_registry={})
         else:
-            self.system_prompt = build_system_prompt(os_name=self.os_name)
+            self.system_prompt = build_system_prompt(os_name=self.os_name, action_registry=registry)
         self.code_agent = CodeAgent(self.model, self.env, budget=code_agent_budget)
 
     def run(self, task: str) -> AgentResult:

@@ -37,7 +37,7 @@ def fixture_evaluator(page):
     }"""))
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default=environment_setting("PLAN_MODEL"))
     parser.add_argument("--api-url", default=environment_setting("PLAN_API_URL"))
@@ -70,6 +70,11 @@ def main():
     parser.add_argument("--logprobs", action="store_true")
     parser.add_argument("--token-ids", action="store_true", help="Requires vLLM token-ID extensions")
     parser.add_argument("--policy-revision", default="")
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
     if not args.model or not args.api_url or not environment_setting(args.api_key_env):
         parser.error("Provide --model, --api-url and set the API key environment variable; no model endpoint is guessed.")

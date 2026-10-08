@@ -78,7 +78,7 @@ class ContextBudgetError(ValueError):
 
 
 class PromptCompiler:
-    version = "3.0"
+    version = "3.1"
 
     def __init__(self, config=None):
         self.config = config or ContextConfig()
@@ -103,6 +103,73 @@ class PromptCompiler:
             else:
                 hi = mid - 1
         return text[:lo] + marker if self.count(marker) <= budget else ""
+
+    def memory(self, memory, budget):
+        """Keep subgoal/facts ahead of bounded diagnostics and emit complete JSON."""
+        if not isinstance(memory, dict):
+            return self.clip(memory, budget)
+        if budget <= 0:
+            return ""
+
+        def render(value):
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        def fits(value):
+            return self.count(render(value)) <= budget
+        def bounded(value):
+            if isinstance(value, str):
+                return self.clip(value, 160)
+            if isinstance(value, dict):
+                return {k: bounded(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [bounded(v) for v in value]
+            return value
+
+        core = {"current_subgoal": memory.get("current_subgoal", ""),
+                "known_facts": memory.get("known_facts", {})}
+        if fits(core):
+            selected = core
+        else:
+            # Oversized durable state is summarized explicitly; complete stored facts remain intact.
+            selected = {}
+            subgoal = self.clip(str(core["current_subgoal"]), min(256, budget // 4))
+            if fits({"current_subgoal": subgoal}):
+                selected["current_subgoal"] = subgoal
+            facts = core["known_facts"]
+            value_budget = max(0, (budget - self.count(render(selected)) - 64) // max(1, len(facts)))
+            kept = {}
+            for key, value in facts.items():
+                compact = value if self.count(render(value)) <= value_budget else self.clip(
+                    value if isinstance(value, str) else render(value), value_budget)
+                candidate = {**selected, "known_facts": {**kept, key: compact}}
+                if fits(candidate):
+                    kept[key] = compact
+                    selected = candidate
+            omitted = len(facts) - len(kept)
+            if omitted and fits({**selected, "omitted_known_facts": omitted}):
+                selected["omitted_known_facts"] = omitted
+
+        for key in ("control", "program", "task_state", "failures", "recent_events", "action_history"):
+            value = bounded(memory.get(key, {} if key in {"control", "program", "task_state"} else []))
+            if not value:
+                continue
+            if fits({**selected, key: value}):
+                selected[key] = value
+            elif isinstance(value, dict):
+                kept = {}
+                for field, detail in value.items():
+                    candidate = {**selected, key: {**kept, field: detail}}
+                    if fits(candidate):
+                        kept[field] = detail
+                        selected = candidate
+            elif isinstance(value, list):
+                kept = []
+                # Prefer the newest records, while retaining chronological display order.
+                for item in reversed(value):
+                    candidate = {**selected, key: [item, *kept]}
+                    if fits(candidate):
+                        kept.insert(0, item)
+                        selected = candidate
+        return render(selected) if fits(selected) else ""
 
     def structure(self, blocks, query, budget):
         """Select complete nodes, retain ancestry and original reading order."""
@@ -200,7 +267,7 @@ class PromptCompiler:
         available = limit - fixed - len(images) * cfg.image_tokens - 1280  # reserve one bounded format retry
         if available < 0:
             raise ContextBudgetError("System prompt and task exceed the context budget; task was not truncated")
-        mem = self.clip(memory, min(cfg.memory_tokens, available // 3))
+        mem = self.memory(memory, min(cfg.memory_tokens, available // 3))
         available -= self.count(mem)
         aux = self.clip(auxiliary, min(cfg.auxiliary_tokens, available // 4))
         available -= self.count(aux)
@@ -231,6 +298,7 @@ class PromptCompiler:
             "tokenization": self.counter.profile,
             "budget_is_estimated": self.counter.processor is None,
             "input_estimate": estimated, "limit": limit, "image_count": len(images),
+            "memory_tokens": self.count(mem), "memory_format": "compact_json" if isinstance(memory, dict) else "text",
             "image_tokens_each_estimate": cfg.image_tokens, "selection": selection,
             "exposed_refs": sorted(refs),
             "ref_aliases": {a: r for s in selection for a, r in s.get("ref_aliases", {}).items()}}

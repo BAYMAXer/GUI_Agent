@@ -48,6 +48,10 @@ class Environment(ABC):
         """可选：取得新观察。旧 adapter 返回 None，保留已有观察。"""
         return None
 
+    def preflight(self, action: Action, observation: Observation) -> Optional[dict]:
+        """Optional input guard. Return a reobserve route when the observation is stale."""
+        return None
+
     @property
     def browser_session(self):
         """Optional focused CDP capability shared by local and OSWorld adapters."""
@@ -247,9 +251,13 @@ class OSWorldEnvironment(Environment):
 
 
 def build_environment(cfg) -> Environment:
-    """根据配置构造环境。目前只支持 osworld。"""
+    """根据配置构造目标环境。"""
     from .config import EnvConfig
     env_cfg: EnvConfig = cfg.env
+    if env_cfg.provider == "windows":
+        from .adapters.windows_env import WindowsEnvironment
+        return WindowsEnvironment(browser_config=env_cfg.browser, artifact_dir=env_cfg.artifact_dir,
+                                  settle_ms=env_cfg.sleep_after_execution * 1000)
     if env_cfg.provider != "osworld":
         raise ValueError(f"不支持的环境 provider: {env_cfg.provider}")
     return OSWorldEnvironment(

@@ -35,6 +35,7 @@ class ActionSpec:
     description: str = ""
     kind: str = "env"          # env / uno / shell / subagent / terminal / memory
     resolve: str = "none"      # none / point / select / drag
+    capability: str = ""      # optional environment capability required to expose this action
 
 
 # --------------------------------------------------------------------------- #
@@ -53,6 +54,7 @@ def load_action_registry() -> Dict[str, ActionSpec]:
                 description=raw.get("description", ""),
                 kind=raw.get("kind", "env"),
                 resolve=raw.get("resolve", "none"),
+                capability=raw.get("capability", ""),
             )
     return registry
 

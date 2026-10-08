@@ -1,132 +1,149 @@
-# osworld_agent：Windows 克隆后安装并运行
+# osworld_agent：Windows 通用 GUI Agent 的移植与运行
 
-本仓库包含 Agent 框架、浏览器适配器和 VMware/OSWorld 适配器。**本地运行指 Agent 在 Windows 上运行；决策模型和视觉定位模型通过 HTTP API 调用。** 不需要本机 GPU。模型服务需要另行部署或使用已开通的服务，并保证新电脑能访问它。
+本仓库的 `computer` profile 在 Windows 主机上执行同一个跨应用任务：普通应用使用桌面截图，按需启动的 Chrome/Edge 网页获焦点时加入精简 AX。进入地址栏、原生对话框、其他应用或结构接口失败时继续纯视觉操作。任务状态、记忆和轨迹在应用切换之间保持连续。详见 [Windows computer use 运行说明](docs/WINDOWS_COMPUTER_USE.md)。
 
-| 运行方式 | 操作对象 | clone 后还需什么 |
+Agent 在本机运行，决策和视觉定位通过兼容 OpenAI Chat Completions 的 HTTP API 调用。安装脚本准备 Python 环境，不部署模型或虚拟机，不要求本机 GPU。通用 GUI 模式需要已解锁、可交互且与目标应用权限一致的 Windows x64 桌面，不支持 `-Headless`。
+
+**交给新电脑上的 Agent 自动执行时，让它完整读取 [Windows 自动跑通文档](docs/WINDOWS_AGENT_RUNBOOK.md)。** 其中包含 uv 安装、参数位置、CMD/PowerShell 命令、独立验收条件及故障处理。
+
+| Profile | 操作对象 | 新电脑需要准备 |
 | --- | --- | --- |
-| 浏览器模式 | Windows 上由 Agent 启动的 Chromium 网页 | 模型 URL、模型名称、API Key；安装脚本自动准备 Python、依赖、Chromium |
-| 完整桌面模式 | VMware 虚拟机内的桌面与应用 | VMware、外部 `desktop_env` 源码与任务集、整个 VM 文件夹和 `init_state` 快照、决策与定位模型端点 |
+| `computer` | Windows 主机上的应用；浏览器为可选增强 | 交互桌面、模型 API；网页任务另需实际浏览器，登录配置可选 |
+| `browser` | 独立的 Chromium 网页专项任务 | 模型 API；安装脚本准备 Playwright Chromium |
+| `desktop` | VMware 客户机中的 OSWorld 任务 | 外部 `desktop_env`、任务集、完整 VM 和快照、VMware、模型 API |
 
-浏览器模式可以独立运行。当前完整桌面模式控制 VMware 客户机；本仓库没有直接接管 Windows 主机上任意应用的运行入口。
+脚本默认 profile 仍为 `browser`。本文主线全部显式使用 `-Profile computer`，旧浏览器表单验收不能证明 Windows 跨应用任务通过。
 
-网页定位支持决策与定位模型独立配置：完整 AX 在本地检索，唯一目标直接执行，歧义目标向定位模型发送少量候选，普通 GUI 保持视觉定位。输入预算、API 配置、统一轨迹与验证方法见 [实现文档](docs/网页定位实现.md)。
+## 1. 仓库与版本
 
-**交给新电脑上的 Agent 自动执行时，先让它完整读取 [Windows 自动跑通文档](docs/WINDOWS_AGENT_RUNBOOK.md)。** 该文档包含输入参数、uv 安装、CMD/PowerShell 命令、验收条件与故障处理。
+代码仓库：[BAYMAXer/GUI_Agent](https://github.com/BAYMAXer/GUI_Agent)，默认分支 `main`。第一版 `v1.0.0`、第二版 `v2.0.0` 保留，第三版 `v3.0.0` 包含本次 Windows 通用 GUI 运行与移植方案。版本区别见 [版本记录](docs/VERSIONS.md)。
 
-## 1. 代码仓库与后续更新
+固定版本使用 `git clone --branch v3.0.0 https://github.com/BAYMAXer/GUI_Agent.git osworld_agent`；需要修改时先从标签创建自己的工作分支。不要复制旧 `.venv` 到新电脑，虚拟环境需要在目标路径重新创建。
 
-代码仓库：[BAYMAXer/master](https://github.com/BAYMAXer/master)，默认分支为 `main`。
+`.gitignore` 排除 `.env`、`.venv`、本机预设、产物、外部 OSWorld 目录和 VM 文件。真实 Key 放 `.env` 或忽略的 `config/model_presets.local.yaml`；已有共享配置中的地址仍需按实际网络核对。上传前检查 `git status --short` 和 `git diff --cached`，不要把 Key 加进仓库 URL。
 
-版本通过 Git 标签保存：第一版为 `v1.0.0`，第二版为 `v2.0.0`；`main` 使用第二版。移植本次代码可使用 `git clone --branch v2.0.0 https://github.com/BAYMAXer/master.git osworld_agent`，这样固定在已交付版本。两版区别见 [版本记录](docs/VERSIONS.md)。
+## 2. 新 Windows 电脑：uv 一键环境
 
-原电脑或已有 clone 的电脑修改代码后，在仓库目录执行：
-
-```powershell
-git add .
-git status --short
-git commit -m "Update agent"
-git push origin main
-```
-
-第一次 push 使用 Git 的 GitHub 登录流程；不要使用账户密码或把 token 写进仓库 URL。若 `git commit` 提示缺少身份，按提示配置自己的 `user.name` 和 `user.email` 后重试。
-
-`.gitignore` 已排除 `.venv`、`.env`、本机配置、运行轨迹、外部 OSWorld 目录及 VMware 文件。上传前检查 `git status --short` 和 `git diff --cached`。已有 `config.yaml` / `config/model_presets.yaml` 包含原环境的模型地址，公开仓库前按需要替换；真实 Key 放 `.env` 或忽略的 `config/model_presets.local.yaml`。
-
-不要上传或复制 `.venv` 到另一台电脑：Python 虚拟环境包含绝对路径，新电脑需要重新创建。
-
-## 2. 新 Windows 电脑：clone + 一键自检
-
-建议 Windows 11 64 位。需要网络访问 GitHub、Python 包源和 Playwright 浏览器下载源。Git 尚未安装时，在 PowerShell 执行后重新打开终端：
+使用 Windows x64 和 64 位 PowerShell；建议 Windows 11。准备 Git，并确保网络能访问 GitHub、Astral、Python 包源和 Playwright 下载源。Git 尚未安装时可在 PowerShell 运行下列命令，完成后重新打开终端：
 
 ```powershell
 winget install --id Git.Git --exact --source winget --accept-package-agreements --accept-source-agreements
 ```
 
-然后执行：
-
-```powershell
-git clone https://github.com/BAYMAXer/master.git osworld_agent
-cd osworld_agent
-.\run.cmd -Mode smoke
-```
-
-首次运行会自动执行 uv 安装：缺少兼容 uv 时将 `.uv-version` 指定的版本安装到仓库内 `.tools/uv/`，由 uv 准备 `.python-version` 指定的 Python 3.12.15、根据 `uv.lock` 创建隔离 `.venv` 并安装本项目，再下载匹配的 Chromium、创建本地配置和运行自检。新电脑无需预装 Python、pip 或 uv。目录名可修改，可包含空格，无需激活 venv或修改系统 PowerShell 执行策略。
-
-自检使用固定动作策略填写本地表单，不调用模型、不需要 Key。成功时报告包含 `success: true`、`score: 1.0`、`grounding_calls: 0`，结果在 `artifacts/windows-smoke/`。**自检验证安装、浏览器、动作执行和轨迹导出；不代表模型任务成功率。**
-
-也可双击 `setup.cmd` 单独安装。**CMD** 中无需命令前面的 `.\`；从仓库目录执行：
+在 **CMD** 中执行，示例路径包含中文和空格：
 
 ```bat
-setup.cmd -SkipSmoke
-run.cmd -Mode smoke
-run.cmd -Mode doctor
+if not exist "%USERPROFILE%\source" mkdir "%USERPROFILE%\source"
+git clone --branch v3.0.0 https://github.com/BAYMAXer/GUI_Agent.git "%USERPROFILE%\source\GUI Agent 移植"
+cd /d "%USERPROFILE%\source\GUI Agent 移植"
+setup.cmd -Profile computer -SkipSmoke
+run.cmd -Mode doctor -Profile computer
+run.cmd -Mode computer-smoke -Profile computer -Channel msedge
 ```
 
-下载 Python 被网络策略阻止时，可先安装受支持的 Python 3.12 64 位版本，并明确指定解释器，依赖仍由 uv 安装：
+PowerShell 等效命令：
 
 ```powershell
-.\setup.cmd -Python "C:\path\to\Python312\python.exe"
+New-Item -ItemType Directory -Path "$env:USERPROFILE\source" -Force | Out-Null
+git clone --branch v3.0.0 https://github.com/BAYMAXer/GUI_Agent.git "$env:USERPROFILE\source\GUI Agent 移植"
+Set-Location -LiteralPath "$env:USERPROFILE\source\GUI Agent 移植"
+.\setup.cmd -Profile computer -SkipSmoke
+.\run.cmd -Mode doctor -Profile computer
+.\run.cmd -Mode computer-smoke -Profile computer -Channel msedge
 ```
 
-## 3. 填一次配置，以后一键运行真实 Agent
+脚本查找兼容 uv，缺少时安装 `.uv-version` 指定版本到 `.tools/uv/`，下载 `.python-version` 中的 Python，以 `uv sync --locked` 安装 `uv.lock` 固定的依赖并创建隔离 `.venv`。computer 安装默认检查交互桌面，不注入输入；仅明确配置 Playwright Chromium 且没有自定义 exe/CDP 时下载 Chromium。使用已安装 Chrome/Edge 无需下载浏览器。无需预装 Python、pip 或 uv，无需激活 venv或修改系统执行策略；已有 `.env` 和本机预设保持原内容。当前固定 uv 0.12.23、Python 3.12.15。
 
-编辑安装时生成的 `.env`，填写：
+`doctor -Profile computer` 检查桌面截图与前台焦点，不注入输入。`computer-smoke` 会操作自身测试记事本和浏览器：验证焦点路由与视觉回退，下载本地测试 PDF，返回记事本回写中文并保存。它使用固定策略和定位替身，`model_verified=false`，不能当成真实模型验证或模型训练样本。报告位于 `artifacts/computer-smoke/report.json`。
+
+若已有受支持的 Python 3.12 x64，可指定 `setup.cmd -Profile computer -Python "C:\实际路径\python.exe" -SkipSmoke`。旧环境失效或继承系统包时，使用 `setup.cmd -Profile computer -RecreateVenv -SkipSmoke`，脚本在本仓库保留旧环境备份后重建。
+
+## 3. 配置模型与按需浏览器
+
+编辑安装生成的根目录 `.env`：
 
 ```dotenv
-PLAN_MODEL=你的模型服务实际提供的模型ID
-PLAN_API_URL=https://你的模型服务器/v1
-PLAN_API_KEY=你的Key
+PLAN_MODEL=实际决策服务模型ID
+PLAN_API_URL=https://实际服务/v1
+PLAN_API_KEY=实际密钥
 PLAN_THINKING_STYLE=none
-OSWORLD_BROWSER_CHANNEL=auto
+
+COMPUTER_BROWSER_CHANNEL=auto
+COMPUTER_BROWSER_EXECUTABLE=
+COMPUTER_BROWSER_PROFILE_DIR=
+COMPUTER_DOWNLOAD_DIR=
+COMPUTER_CDP_ENDPOINT=
 ```
 
-模型应兼容 OpenAI Chat Completions 和图片输入。`PLAN_*` 配置决策服务，`GROUNDING_*` 配置定位服务，均可填兼容服务的实际模型 ID。URL 填 API base URL，不填完整的 `/chat/completions`。未认证的内网端点明确填写 `PLAN_API_KEY=EMPTY`。远程内网模型需要连接同一网络/VPN。`PLAN_THINKING_STYLE` 可选 `none`、`vllm`、`dashscope`，按服务协议设置。旧环境变量别名通过 `config/environment_aliases.json` 兼容，非空的新变量优先。
+URL 是服务的 API base URL，不附加 `/chat/completions`。未认证端点需要明确填写 `PLAN_API_KEY=EMPTY`。`PLAN_THINKING_STYLE` 可选 `none`、`vllm`、`dashscope`，按实际服务协议设置。服务必须支持图片输入；跨普通应用的目标操作还需要视觉定位能力。
 
-`.env` 采用 `NAME=value`，支持带引号的字面值和整行 `#` 注释，不支持变量展开、行尾注释或多行值。当前终端中已有的非空环境变量优先于 `.env`。
+独立定位服务可填写以下字段；没有 `GROUNDING_API_URL` 时，computer 入口复用 PLAN 服务，故该服务必须同时支持决策和所选视觉定位协议：
 
-双击 `run.cmd` 即可显示浏览器并运行默认本地表单任务；也可在 PowerShell 指定自己的网页任务：
-
-```powershell
-.\run.cmd -Url "https://example.com" -Task "查看页面并返回页面标题"
-.\run.cmd -Url "https://你的测试网站" -Task "你的任务指令" -MaxSteps 20
+```dotenv
+GROUNDING_MODEL=实际定位服务模型ID
+GROUNDING_API_URL=https://实际定位服务/v1
+GROUNDING_API_KEY=实际定位密钥
+GROUNDING_PROTOCOL=structured
+GROUNDING_THINKING_STYLE=none
 ```
 
-默认启动新的浏览器会话，不自动继承个人 Chrome 登录状态。`auto` 依次尝试下载的 Chromium、已安装的 Edge、Chrome，并在发生切换时打印实际选择。可加 `-Headless` 后台执行，或 `-Channel chromium` / `-Channel chrome` / `-Channel msedge` 固定浏览器。运行轨迹和报告保存到 `artifacts/browser-agent/`（每次覆盖同名文件）。若要自定义输出目录、接入已有 CDP 浏览器或调整更多参数，使用底层入口：
+定位协议可选 `structured`、`pixel`、`normalized`，复用 PLAN 也读取 `GROUNDING_PROTOCOL` / `-GroundType`；`auto` 按模型注册表选择，通常为 `structured`。对任意部署名称建议显式填写实际协议。复用 PLAN 不等于安装或获得另一个定位模型；报告记录实际使用的角色和端点。不要在 CMD 命令里填写 Key。
 
-```powershell
-.\.venv\Scripts\python.exe -m osworld_agent.run_browser_windows --help
-```
+`.env` 支持 `NAME=value`、整行注释和带引号的字面值，不支持变量展开、行尾注释或多行值。终端已有的非空环境变量优先；路径相对仓库根目录解析，可包含中文和空格。
 
-底层 Python 入口本身不读取 `.env`；`run.cmd` 负责加载。定位默认使用 `structured` 双模式协议；配置 `.env` 中的 `GROUNDING_API_URL`、`GROUNDING_MODEL`、`GROUNDING_API_KEY`。`GROUNDING_MODEL=grounding` 使用配置注册表中的默认服务，也可填实际模型 ID。其他定位协议通过 `--ground-type pixel/normalized` 指定，旧协议值在配置层兼容。未配置定位端点时使用 DOM/AX 动作，需要视觉定位或节点消歧时会显式失败。
+| 浏览器配置 | 用途 |
+| --- | --- |
+| `COMPUTER_BROWSER_CHANNEL` | `auto` 尝试已安装 Chrome、Edge，再 Playwright Chromium；可固定 `chrome` / `msedge` / `chromium` |
+| `COMPUTER_BROWSER_EXECUTABLE` | 显式浏览器 exe，例如 `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe` |
+| `COMPUTER_BROWSER_PROFILE_DIR` | 留空使用独立任务目录；填写专用 Agent 配置目录可保留登录状态 |
+| `COMPUTER_DOWNLOAD_DIR` | 自行启动浏览器的下载目录；留空保存到任务产物的 downloads 目录 |
+| `COMPUTER_CDP_ENDPOINT` | 可选本机已启动浏览器的 CDP URL，如 `http://127.0.0.1:9222` |
 
-新电脑应把 API 实际提供的模型 ID 写入 `.env`。定位服务的协议通过 `GROUNDING_PROTOCOL=structured/pixel/normalized` 配置，命令行可用 `-GroundType` 覆盖；没有定位服务时保持定位 URL 为空。`.env` 中的 Key 不需要放进 CMD 命令。
+浏览器只在模型输出 `open_browser` 时启动或接入；`-Url` 为任务补充网页信息。个人浏览器登录状态不会自动继承。已打开的持久目录通过 CDP 接入，避免并发启动相同配置目录；接入实例的关闭和下载设置不归本任务管理。未接入的浏览器仍可纯视觉操作。
 
-完整浏览器验收使用默认本地表单和独立 evaluator，依次检查环境、固定动作策略、配置的真实模型；需要先填写模型配置：
+## 4. 跨应用真实模型验收与命令行任务
+
+先填写实际服务参数，在可交互桌面上执行：
 
 ```bat
-run.cmd -Mode acceptance
+run.cmd -Mode computer-acceptance -Profile computer -Channel msedge -MaxSteps 30
 ```
 
-结果在 `artifacts/acceptance/report.json`。只有 `success=true`、`real_model_verified=true` 且实际任务得分为 `1.0` 才算模型跑通。缺少配置返回 `status=blocked` 和非零退出码。普通任务失败也返回非零退出码；使用 `-Output "artifacts/my-task"` 可避免覆盖其他任务结果。
+验收依次执行 computer doctor、固定策略 computer smoke 和配置模型的本地跨应用任务。真实模型须从记事本任务出发，访问本地论文检索页，下载测试论文 PDF，再回到同一记事本记录并保存指定结果。独立 evaluator 核对下载文件、记事本内容及前台文档。总报告是 `artifacts/computer-acceptance/report.json`，环境检查在 `doctor.json`，任务证据在 `smoke/` 和 `computer-agent/`。
 
-## 4. 完整桌面模式：迁移 OSWorld + VMware，再一键启动 Web GUI
+只有退出码 0、总报告 `status="passed"`、`success=true`、`real_model_verified=true`、`cross_application_verified=true`，且真实任务报告 `cross_application_verified=true`、独立 evaluator 的 `score=1.0`，才算跨应用模型跑通。缺参数为 `blocked`，调用或任务失败为 `failed`，均返回非零。安装、工程 smoke 或模拟 HTTP 成功不能代替真实模型阶段。
 
-Git clone 只迁移本仓库代码。原机器的 OSWorld 源码、任务集和 VM 不在这个仓库里，需要通过其原仓库或文件传输单独准备，建议结构：
+验收使用隔离的浏览器 profile、CDP 与下载目录，不使用 `.env` 中持久登录设置；不能给该命令显式传这些目录/接入参数。浏览器 channel 和自定义 exe 仍可按新电脑配置。
 
-```text
-osworld_agent/
-  external/OSWorld/                # 与原机相同提交的外部仓库
-    desktop_env/
-    requirements.txt
-    evaluation_examples/examples/
-    vmware_vm_data/Ubuntu0/        # 整个 VM 目录，不只 .vmx
-      Ubuntu0.vmx
-      *.vmdk / *.vmsn / ...        # 磁盘及快照链
+自定义任务在 **CMD** 中执行：
+
+```bat
+run.cmd -Profile computer -Task "读取当前记事本任务，按需打开网页，完成后回到记事本记录结果" -MaxSteps 30 -Output "artifacts\我的任务 01"
+run.cmd -Profile computer -Task "完成当前桌面任务" -Channel chrome -BrowserExecutable "C:\Program Files\Google\Chrome\Application\chrome.exe" -BrowserProfileDir "D:\Agent 数据\Chrome Profile" -DownloadDir "D:\Agent 数据\下载" -MaxSteps 30
 ```
 
-原机在包含 `desktop_env` 的外部仓库运行 `git remote -v`、`git rev-parse HEAD`，记录真实远端和提交；新机 clone 该远端到 `external/OSWorld` 并 checkout 同一提交。不要只凭仓库名称换成另一分支；外部仓库必须实际包含 `desktop_env/`。任务集若在另一目录，也单独复制并修改路径。
+PowerShell 在命令前加 `.\`。可用 `-Model`、`-ApiUrl`、`-GroundType` 覆盖本次模型设置，`-TrustEnv` 允许模型请求使用系统代理。computer 任务必须提供 `-Task`，不支持 `-Headless`。默认输出在 `artifacts/computer-agent/<时间-标识>/`；自定义任务没有独立 evaluator 时 `score=null`，完成结论须结合用户指定的结果证据。
 
-先正常关闭虚拟机，再复制整个 VM 目录和 `init_state` 快照到新机；在新机安装 VMware Workstation，确认 `vmrun.exe` 可用，并把其安装目录加入 PATH。已有 VM 的准备细节见 [本地环境搭建指南](docs/本地环境搭建指南.md)。安装完成后编辑 `.env`：
+底层入口 `python -m osworld_agent.run_computer_windows --help` 不读取 `.env`；使用包装器可自动加载配置和检查环境。`config.yaml` / `python -m osworld_agent.main` 仍为旧 OSWorld 配置与占位入口。
+
+## 5. 浏览器专项入口
+
+单独网页任务可继续使用 `browser` profile。它与通用 GUI 的按需浏览器配置不同：`OSWORLD_BROWSER_CHANNEL=auto` 依次尝试 Playwright Chromium、Edge、Chrome；可以 Headless。
+
+```bat
+setup.cmd -Profile browser -SkipSmoke
+run.cmd -Mode smoke -Profile browser
+run.cmd -Mode acceptance -Profile browser
+run.cmd -Profile browser -Url "https://example.com" -Task "查看页面并返回标题" -MaxSteps 20 -Output "artifacts\browser-task"
+```
+
+浏览器专项真实验收写入 `artifacts/acceptance/report.json`，使用 Acme Ltd / Enterprise / 通知开启的本地表单及独立 evaluator。没有定位 URL 时只可执行确定的 DOM/AX 动作，视觉定位或歧义目标会失败。此验收不能证明 Windows 普通应用的视觉操作通过。
+
+## 6. VMware / OSWorld 附录
+
+Windows 主机通用 GUI 不需要 VMware。只有运行 OSWorld 客户机任务时，单独准备 VMware Workstation、与原机同一提交的外部 OSWorld（含 `desktop_env/`）、任务 JSON 和完整 VM 目录（含磁盘、快照链）。先正常关闭 VM 再迁移，不能只复制 `.vmx`。当前适配器控制 Ubuntu 客户机，客户机终端仍使用 Linux 协议。
+
+根目录 `.env` 示例：
 
 ```dotenv
 OSWORLD_DESKTOP_ENV_PATH=external/OSWorld
@@ -138,43 +155,32 @@ AGENTS_RESULTS_DIR=artifacts/viz
 AGENTS_VIZ_PORT=8088
 ```
 
-相对路径从本仓库根目录计算，也支持含空格的绝对路径。编辑 `config/model_presets.local.yaml`，配置新电脑能访问的决策模型及 grounding 模型的名称、URL、Key 和 grounding `type`（`structured`、`pixel` 或 `normalized`）。此文件从现有预设复制生成并被 Git 忽略；桌面 GUI 使用这个预设文件，浏览器 CLI 使用 `PLAN_*` 和 `GROUNDING_*` 配置。
-
-快照名以实际 VM 为准：便携脚本默认使用 `init_state`；若原机使用 `init_state_ca3` 或其他名称，把 `OSWORLD_SNAPSHOT_NAME` 改为该名称。检查和任务运行读取同一个配置。
-
-最后：
-
-```powershell
-.\setup.cmd -Profile desktop
-.\run.cmd -Mode viz -Profile desktop
-```
-
-桌面安装先按 `uv.lock` 安装 Agent，再把外部 OSWorld 的依赖装入本仓库 `.venv`，并用锁文件导出的约束保持核心依赖版本。若外部版本依赖不适用于 Windows或与本仓库冲突，安装会报错停止；需要使用该外部版本的 Windows 依赖清单，可通过 `OSWORLD_DESKTOP_REQUIREMENTS` 指定。脚本不会自动删依赖或替换外部版本。
-
-完整桌面任务也支持纯命令行；模型与 Key 从 `.env` 的 `PLAN_*`、`GROUNDING_*` 读取，不依赖网页模型预设：
+路径和快照名按新机器实际情况填写；记录原机外部仓库的远端与提交。先检查：
 
 ```bat
-run.cmd -Mode vm -TaskId "实际任务ID" -Domain chrome -MaxSteps 20
+setup.cmd -Profile desktop -SkipSmoke
+run.cmd -Mode doctor -Profile desktop
+run.cmd -Mode vm -Profile desktop -TaskId "实际任务ID" -Domain chrome -MaxSteps 20
+run.cmd -Mode viz -Profile desktop
 ```
 
-任务启动会回退 VM 到 `.env` 指定的快照；Web GUI 仍使用 `config/model_presets.local.yaml`。`config.yaml` 和 `python -m osworld_agent.main` 是旧 OSWorld 配置/占位入口，不能当作当前 Windows 浏览器运行入口。
+VM CLI 使用 `.env` 的 `PLAN_*` / `GROUNDING_*`；Web GUI 使用忽略的 `config/model_presets.local.yaml`，须填写新机器可访问的模型 ID、URL、Key 与定位 `type`。VM 任务会回退到配置快照，执行前保留客户机未保存的工作。GUI 在 `http://127.0.0.1:8088`，Ctrl+C 停止服务。
 
-启动前检查 `desktop_env` 导入、任务 JSON、`vmrun`、`.vmx`、`init_state` 快照和模型预设；不自动启动或回退 VM。通过后启动 GUI 并自动打开 `http://127.0.0.1:8088`，在网页选择任务/模型并开始运行，Ctrl+C 停止服务器。需要任务环境自身的上游代理时才设置 `OSWORLD_UPSTREAM_PROXY`；已移除强制使用原电脑内网代理的默认值。
+外部依赖通过锁文件约束下的 `uv pip install` 安装；冲突时停止，使用该外部版本适用的 Windows 清单并配置 `OSWORLD_DESKTOP_REQUIREMENTS`。安装器不会安装 VMware、迁移 VM 或部署模型。更多准备细节见 [本地环境搭建指南](docs/本地环境搭建指南.md)。
 
-**若没有迁移 VM/任务集或无法访问远程模型，只有 clone 代码不能完成桌面任务。** VMware 安装、VM 文件传输和远程模型部署不属于浏览器一键安装脚本自动完成的部分。
+## 7. 排查与更新
 
-## 5. 排查与更新
+更新主线时先确认工作区干净且当前跟踪 `main`；固定标签 checkout 不直接 `git pull`。保留已有修改，再切换需要的版本。
 
-```powershell
-.\run.cmd -Mode doctor                         # Python/浏览器自检，不要求模型 Key
-.\run.cmd -Mode doctor -CheckApi               # 额外检查配置端点的 GET /models
-.\run.cmd -Mode doctor -Profile desktop        # 额外检查 OSWorld/VMware/快照
-git pull
-.\setup.cmd                                   # 更新包与对应 Chromium；本地 .env 不覆盖
+```bat
+run.cmd -Mode doctor -Profile computer
+run.cmd -Mode doctor -Profile computer -CheckApi
+git pull --ff-only
+setup.cmd -Profile computer -SkipSmoke
 ```
 
-`-CheckApi` 不发起推理请求；部分服务没有 `/models` 接口，此检查失败不一定意味着推理不可用，也不会验证视觉能力。安装下载失败时检查网络、代理或企业证书；uv 的包源使用 `UV_DEFAULT_INDEX`，浏览器下载可用 `HTTPS_PROXY`、`NODE_EXTRA_CA_CERTS`、`PLAYWRIGHT_DOWNLOAD_HOST`。旧 `.venv` 失效或继承系统包时，执行 `setup.cmd -RecreateVenv`；脚本会在本仓库内保留旧环境备份后重建，不删除它。
+`-CheckApi` 只发决策服务的 `GET /models`，不能验证推理、定位能力或任务效果；不提供该接口的服务需以实际任务结果判断。Key 不应输出到报告。网络下载问题检查代理、证书与 VPN；包源可使用 `UV_DEFAULT_INDEX`，浏览器下载可使用 `HTTPS_PROXY`、`NODE_EXTRA_CA_CERTS`、`PLAYWRIGHT_DOWNLOAD_HOST`。
 
-一键脚本使用 `uv.lock` 固定依赖及下载哈希，`.python-version` 固定默认 Python 补丁版本。运行器检查环境标记，元数据或锁文件变化时自动重新安装；启动使用 `uv run --locked --no-sync`，保留桌面模式额外安装的依赖。`requirements-windows.lock.txt` 仅保留为旧 pip 环境的历史记录。系统 Edge/Chrome 与外部 OSWorld 的版本需要另行记录。
+锁屏、远程会话断开、权限差异或无法取得前台焦点时，先恢复交互桌面再验收。浏览器结构失败应回退视觉；需要可用的视觉定位服务。`uv sync --locked` 报不一致时核对源码与锁文件来自同一版本，部署时不要自动重新解锁依赖。
 
-安装方式参考 [uv 安装文档](https://docs.astral.sh/uv/getting-started/installation/)、[uv Python 管理](https://docs.astral.sh/uv/guides/install-python/)、[uv 锁定与同步](https://docs.astral.sh/uv/concepts/projects/sync/) 和 [Playwright 浏览器安装文档](https://playwright.dev/python/docs/browsers)。
+脚本依据环境指纹检测锁文件/元数据变化，再安装后以 `uv run --locked --no-sync` 启动；`requirements-windows.lock.txt` 是旧 pip 环境历史记录。系统浏览器及外部 OSWorld 版本另行记录。安装机制参考 [uv 安装](https://docs.astral.sh/uv/getting-started/installation/)、[Python 管理](https://docs.astral.sh/uv/guides/install-python/) 和 [Playwright 浏览器](https://playwright.dev/python/docs/browsers)。

@@ -1,10 +1,13 @@
 """Browser ownership, delegated launchers and download lifecycle without UI input."""
 from pathlib import Path
 from types import SimpleNamespace
+from dataclasses import replace
 
 import pytest
 
 from osworld_agent.adapters.browser_runtime import BrowserRuntime, BrowserRuntimeConfig
+from osworld_agent.adapters.windows_env import WindowsEnvironment
+from osworld_agent.actions import Action
 from osworld_agent.tests.test_windows_env import BROWSER, Native
 
 
@@ -28,7 +31,10 @@ def connection(tmp_path, monkeypatch):
     cdp = CDP()
     browser = SimpleNamespace(new_browser_cdp_session=lambda: cdp,
         close=lambda: calls.append(("close_owned_browser", None)), is_connected=lambda: True)
-    pw = SimpleNamespace(chromium=SimpleNamespace(connect_over_cdp=lambda *a, **kw: browser),
+    def connect(*args, **kwargs):
+        assert kwargs["no_defaults"] is True
+        return browser
+    pw = SimpleNamespace(chromium=SimpleNamespace(connect_over_cdp=connect),
                          stop=lambda: calls.append(("disconnect", None)))
     monkeypatch.setattr(playwright.sync_api, "sync_playwright", lambda: SimpleNamespace(start=lambda: pw))
     process = SimpleNamespace(cmdline=lambda: command, wait=lambda timeout: calls.append(("wait_owned", timeout)))
@@ -174,7 +180,10 @@ def delayed_launch(tmp_path, monkeypatch):
         window_queries.append(pid)
         return [400] if pid == 40 and now[0] >= window_ready[0] else []
     native.windows = windows
-    def activate(window):
+    native.place_window = lambda window: native.events.append(("place", window))
+    def activate(window, *, allow_input_fallback=True):
+        assert not allow_input_fallback
+        assert native.events[0] == ("place", window)
         activated.append(window)
         native.foreground = replace(BROWSER, process_id=40, window_id=str(window))
     native.activate = activate
@@ -193,6 +202,7 @@ def test_visual_fallback_waits_for_delayed_window(delayed_launch):
     assert 0.2 <= now[0] <= runtime.config.startup_timeout_s
     assert len(window_queries) > 1 and set(window_queries) == {40} and activated == [400]
     assert runtime._owned_process.pid == 40 and runtime.session is None
+    assert runtime.native.events[0] == ("place", 400) and result["navigation_needed"]
 
 
 def test_visual_fallback_waits_for_delayed_delegated_pid(delayed_launch):
@@ -236,3 +246,51 @@ def test_attached_browser_wait_does_not_adopt_or_own_existing_process(tmp_path, 
     assert runtime.open()["process_id"] == 40
     assert now[0] >= 0.2 and runtime.process is None and runtime._owned_process is None
     runtime.close()
+
+
+@pytest.fixture
+def opening_focus_change(tmp_path, monkeypatch):
+    """Use the actual environment navigation guard with synthetic focus events."""
+    native = Native()
+    native.foreground = replace(BROWSER, generation=3, foreground_generation=7, focus_id="chrome-content")
+    native.windows = lambda pid: [30]
+    runtime = BrowserRuntime(native, BrowserRuntimeConfig(endpoint="http://localhost:9222"), tmp_path)
+    switch_foreground = [False]
+    navigation = []
+    environment = WindowsEnvironment(native=native, runtime=runtime, settle_ms=0)
+
+    def page_focus(page):
+        current = native.foreground
+        native.foreground = replace(current, generation=current.generation + 1,
+            foreground_generation=current.foreground_generation + (2 if switch_foreground[0] else 0),
+            focus_id="chrome-new-content")
+        return True
+
+    page = SimpleNamespace(is_closed=lambda: False,
+        goto=lambda *args, **kwargs: navigation.append(tuple(environment._dispatch_focus)))
+    runtime._browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[page])])
+    runtime.session = SimpleNamespace(_real_page_focus=page_focus, invalidate=lambda: None, close=lambda: None)
+    monkeypatch.setattr(runtime, "_connect", lambda: setattr(runtime, "process_id", 40))
+    monkeypatch.setattr(runtime, "focused_session", lambda foreground: None)
+    environment.reset("Open the task browser")
+    yield environment, native, switch_foreground, navigation
+    environment.close()
+
+
+def test_browser_internal_control_focus_change_allows_guarded_navigation(opening_focus_change):
+    environment, native, _, navigation = opening_focus_change
+    result = environment.step(Action("open_browser", {"url": "https://example.invalid"}))
+    assert result.info["status"] == "executed" and not result.info["navigation_needed"]
+    assert len(navigation) == 1
+    # before_navigate rebinds the new control ticket and keeps the foreground epoch.
+    assert navigation[0][3] == "chrome-new-content" and navigation[0][5:] == (4, 7)
+    assert not native.events
+
+
+def test_browser_away_and_back_foreground_epoch_change_blocks_navigation(opening_focus_change):
+    environment, native, switch_foreground, navigation = opening_focus_change
+    switch_foreground[0] = True
+    result = environment.step(Action("open_browser", {"url": "https://example.invalid"}))
+    assert result.info["status"] == "uncertain"
+    assert "Browser focus changed before navigation" in result.info["error"]
+    assert not navigation and not native.events

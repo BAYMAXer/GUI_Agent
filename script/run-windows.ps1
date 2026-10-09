@@ -7,6 +7,7 @@ param(
     [string]$Output = '',
     [string]$BrowserExecutable = '', [string]$BrowserProfileDir = '', [string]$CdpEndpoint = '',
     [string]$DownloadDir = '',
+    [string]$Monitor = '',
     [ValidateSet('auto', 'structured', 'pixel', 'normalized')][string]$GroundType = '',
     [ValidateSet('auto', 'chromium', 'chrome', 'msedge')][string]$Channel = '',
     [int]$MaxSteps = 12,
@@ -45,6 +46,7 @@ try {
         else { $env:OSWORLD_BROWSER_CHANNEL = $Channel }
     }
     if ($Profile -eq 'computer') {
+        if ($PSBoundParameters.ContainsKey('Monitor')) { $env:COMPUTER_MONITOR = $Monitor }
         if ($BrowserExecutable) { $env:COMPUTER_BROWSER_EXECUTABLE = $BrowserExecutable }
         if (-not $isolatedComputerBrowser) {
             if ($BrowserProfileDir) { $env:COMPUTER_BROWSER_PROFILE_DIR = $BrowserProfileDir }
@@ -103,13 +105,13 @@ try {
             Invoke-AgentModule 'osworld_agent.script.smoke_browser_windows' $smokeArgs
         }
         'computer-smoke' {
-            $smokeArgs = @('--channel', $Channel)
+            $smokeArgs = @('--channel', $Channel, '--monitor', $env:COMPUTER_MONITOR)
             if ($env:COMPUTER_BROWSER_EXECUTABLE) { $smokeArgs += @('--browser-executable', $env:COMPUTER_BROWSER_EXECUTABLE) }
             if ($Output) { $smokeArgs += @('--output', $Output) }
             Invoke-AgentModule 'osworld_agent.script.smoke_computer_windows' $smokeArgs
         }
         'computer-acceptance' {
-            $acceptArgs = $modelArgs + @('--channel', $Channel, '--max-steps', [string]$MaxSteps)
+            $acceptArgs = $modelArgs + @('--channel', $Channel, '--monitor', $env:COMPUTER_MONITOR, '--max-steps', [string]$MaxSteps)
             if ($env:COMPUTER_BROWSER_EXECUTABLE) { $acceptArgs += @('--browser-executable', $env:COMPUTER_BROWSER_EXECUTABLE) }
             if ($Output) { $acceptArgs += @('--output', $Output) }
             Invoke-AgentModule 'osworld_agent.script.acceptance_computer_windows' $acceptArgs
@@ -122,7 +124,7 @@ try {
         'doctor' {
             $doctorArgs = @()
             if ($Profile -eq 'desktop') { $doctorArgs += '--desktop' }
-            if ($Profile -eq 'computer') { $doctorArgs += '--computer' }
+            if ($Profile -eq 'computer') { $doctorArgs += @('--computer', '--monitor', $env:COMPUTER_MONITOR) }
             if ($CheckApi) { $doctorArgs += '--check-api' }
             if ($Output) { $doctorArgs += @('--output', $Output) }
             Invoke-AgentModule 'osworld_agent.script.doctor' $doctorArgs
@@ -160,6 +162,7 @@ try {
             }
             $runnerArgs = $modelArgs + @('--channel', $Channel, '--max-steps', [string]$MaxSteps)
             if ($Profile -eq 'computer') {
+                $runnerArgs += @('--monitor', $env:COMPUTER_MONITOR)
                 if ($BrowserExecutable) { $runnerArgs += @('--browser-executable', $BrowserExecutable) }
                 if ($BrowserProfileDir) { $runnerArgs += @('--browser-profile-dir', $BrowserProfileDir) }
                 if ($CdpEndpoint) { $runnerArgs += @('--cdp-endpoint', $CdpEndpoint) }

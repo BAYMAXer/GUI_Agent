@@ -8,9 +8,8 @@ from pathlib import Path
 import threading
 import uuid
 
-from ..actions import Action
 from ..adapters.windows_env import WindowsEnvironment
-from .smoke_computer_windows import QuietHandler, open_notepad, test_pdf, window_title
+from .smoke_computer_windows import QuietHandler, close_notepad, open_notepad, test_pdf, window_title
 
 
 EXPECTED_NOTE = "已下载 GUI Agent Browser Study 论文 PDF。跨应用任务验证完成。"
@@ -32,9 +31,10 @@ def crossed_applications(trajectory):
 
 
 class ComputerFixture:
-    def __init__(self, output, browser_config):
+    def __init__(self, output, browser_config, monitor=None):
         self.output = Path(output).resolve()
         self.config = browser_config
+        self.monitor = monitor
         self.environment = self.server = self.worker = self.notepad = None
 
     def __enter__(self):
@@ -58,7 +58,7 @@ class ComputerFixture:
         isolated = replace(self.config, endpoint="", profile_dir="", download_dir=str(self.downloads))
         try:
             self.environment = WindowsEnvironment(browser_config=isolated, artifact_dir=self.output,
-                                                  evaluator=self.evaluate)
+                                                  evaluator=self.evaluate, monitor=self.monitor)
             _, self.notepad = open_notepad(self.environment, self.notes)
             return self
         except Exception:
@@ -80,13 +80,7 @@ class ComputerFixture:
     def __exit__(self, *_):
         if self.environment is not None:
             try:
-                if (self.notepad is not None and
-                        self.notes.stem.lower() in window_title(self.environment.native.user, self.notepad.window_id).lower()):
-                    self.environment.native.activate(self.notepad.window_id)
-                    self.environment.observe()
-                    self.environment.step(Action("hotkey", {"keys": ["ctrl", "s"]}))
-                    self.environment.observe()
-                    self.environment.step(Action("hotkey", {"keys": ["ctrl", "w"]}))
+                close_notepad(self.environment, self.notepad, self.notes)
             except Exception:
                 pass
             finally:

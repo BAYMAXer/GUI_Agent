@@ -21,7 +21,9 @@ from osworld_agent.scene import Foreground
 DESKTOP = Foreground(available=True, window_id="10", focus_id="11", process_id=20, process_name="notepad.exe")
 BROWSER = Foreground(available=True, window_id="30", process_id=40, process_name="chrome.exe", is_browser=True)
 GEOMETRY = {"left": -100, "top": -20, "width": 300, "height": 200, "scale": 1,
-            "coordinate_space": "desktop_physical", "monitors": [{"left": -100, "top": -20, "width": 300, "height": 200}]}
+            "coordinate_space": "desktop_physical", "target_monitor": "TEST_DISPLAY",
+            "capture_geometry": {"left": -100, "top": -20, "width": 300, "height": 200},
+            "monitors": [{"device": "TEST_DISPLAY", "primary": True, "left": -100, "top": -20, "width": 300, "height": 200}]}
 
 
 class Native:
@@ -29,15 +31,36 @@ class Native:
     closed = False
     def __init__(self):
         self.events = []
+        self.safety_events = []
         self.layout = dict(GEOMETRY)
     def probe(self):
         return self.foreground
     def geometry(self):
         return self.layout
     def capture(self):
-        return Image.new("RGB", (self.layout["width"], self.layout["height"])), dict(self.layout)
+        capture = self.layout.get("capture_geometry", self.layout)
+        return Image.new("RGB", (capture["width"], capture["height"])), dict(self.layout)
+    def window_bounds(self, window_id):
+        capture = self.layout.get("capture_geometry", self.layout)
+        return {"left": capture["left"], "top": capture["top"],
+                "right": capture["left"] + capture["width"], "bottom": capture["top"] + capture["height"]}
+    def window_process(self, window_id):
+        return {"10": 20, "30": 40}.get(str(window_id), 0)
+    def window_at_point(self, point):
+        return self.foreground.window_id
+    def related_window(self, candidate, expected):
+        return candidate == expected
+    def place_window(self, window_id):
+        self.safety_events.append(("place", str(window_id)))
+    def activate(self, window_id, **kwargs):
+        self.safety_events.append(("activate", str(window_id), kwargs))
+        target = {"10": DESKTOP, "30": BROWSER}[str(window_id)]
+        self.foreground = replace(target, generation=self.foreground.generation + 1)
     def click(self, point, geometry, **kwargs):
+        after_click = kwargs.pop("after_click", None)
         self.events.append(("click", point, kwargs))
+        if after_click:
+            after_click()
     def hotkey(self, keys):
         self.events.append(("keys", keys))
     def type_text(self, text, guard=None):
@@ -122,6 +145,7 @@ def test_other_browser_and_native_ui_are_visual(desktop):
     env, native = desktop
     env.runtime.process_id = 50
     native.foreground = BROWSER
+    assert env.adopt_window()
     observed = env.observe()
     assert not observed.context and not observed.structure_available
     assert observed.info["scene"]["reason"] == "browser_instance_not_bound"
@@ -140,6 +164,7 @@ def test_ordinary_apps_do_not_attempt_cdp(desktop, monkeypatch):
 def test_unavailable_structure_does_not_stop_desktop_task(desktop, monkeypatch):
     env, native = desktop
     native.foreground = BROWSER
+    assert env.adopt_window()
     env.runtime.endpoint = "http://127.0.0.1:9999"
     monkeypatch.setattr(env.runtime, "_connect", lambda: (_ for _ in ()).throw(RuntimeError("No CDP")))
     observation = env.observe()
@@ -286,11 +311,11 @@ def computer_doctor(tmp_path, monkeypatch):
     monkeypatch.setattr(doctor, "importlib", SimpleNamespace(import_module=lambda name: SimpleNamespace()))
     monkeypatch.setattr(browser_module, "launch_browser", lambda *a, **kw: pytest.fail("Computer doctor must not launch a browser"))
     for name in ("COMPUTER_BROWSER_CHANNEL", "COMPUTER_BROWSER_EXECUTABLE", "COMPUTER_CDP_ENDPOINT",
-                 "COMPUTER_BROWSER_PROFILE_DIR", "COMPUTER_DOWNLOAD_DIR"):
+                 "COMPUTER_BROWSER_PROFILE_DIR", "COMPUTER_DOWNLOAD_DIR", "COMPUTER_MONITOR"):
         monkeypatch.delenv(name, raising=False)
 
     class FakeEnvironment:
-        def __init__(self, *, browser_config):
+        def __init__(self, *, browser_config, monitor="primary"):
             received_configs.append(browser_config)
             self.native = Native()
         def observe(self):

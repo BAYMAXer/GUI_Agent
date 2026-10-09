@@ -20,7 +20,7 @@ def run_real_fixture(args):
               "cross_application_verified": False, "test_kind": "configured_model_real_windows_desktop"}
     try:
         with ComputerFixture(output, BrowserRuntimeConfig(channel=args.channel,
-                             executable=args.browser_executable)) as fixture:
+                             executable=args.browser_executable), monitor=args.monitor) as fixture:
             args.task, args.url = fixture.task, ""
             report = execute_task(args, environment=fixture.environment)
             trajectory = json.loads(Path(report["trajectory"]).read_text(encoding="utf-8"))
@@ -36,12 +36,12 @@ def run_real_fixture(args):
                       reason="Real desktop fixture failed; inspect this stage's stdout and trajectory.")
         print(f"Computer fixture failed ({type(exc).__name__}).")
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    return 0 if report["success"] else 1
+    return 0 if report["success"] and not report.get("safety_stop") else 1
 
 
 def model_arguments(args):
     parameters = []
-    for name in ("model", "api_url", "api_key_env", "thinking_style", "channel", "browser_executable",
+    for name in ("model", "api_url", "api_key_env", "thinking_style", "channel", "browser_executable", "monitor",
                  "max_steps", "context_window", "input_budget", "tokenizer_path", "processor_path",
                  "ground_url", "ground_model", "ground_type", "ground_key_env", "ground_thinking_style",
                  "ground_tokenizer_path", "ground_processor_path", "ground_policy_revision", "policy_revision"):
@@ -92,11 +92,11 @@ def main():
     save()
     try:
         doctor = run_stage("environment", "osworld_agent.script.doctor",
-                           ["--computer", "--output", str(output / "doctor.json")], output / "doctor.json")
+                           ["--computer", "--monitor", args.monitor, "--output", str(output / "doctor.json")], output / "doctor.json")
         if not doctor["success"]:
             raise RuntimeError("Interactive Windows environment check failed")
         smoke_dir = output / "smoke"
-        smoke_args = ["--channel", args.channel, "--output", str(smoke_dir)]
+        smoke_args = ["--channel", args.channel, "--monitor", args.monitor, "--output", str(smoke_dir)]
         if args.browser_executable:
             smoke_args.extend(["--browser-executable", args.browser_executable])
         smoke = run_stage("scripted_cross_application", "osworld_agent.script.smoke_computer_windows",

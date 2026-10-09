@@ -19,6 +19,30 @@ computer-smoke 会操作真实窗口：显示独立测试文档，访问本机�
 
 报告位于指定目录的 `report.json`，截图与统一 v3 轨迹同目录。每次使用新的 fixture 子目录和下载目录，避免旧成功文件通过新验收。验收要求退出码 0、所有 checks 通过、独立文件核对 score=1。物理点击坐标来自实际桌面截图；负坐标显示器原点、显示器间隙、DPI 和布局变更会在执行层处理。
 
+## 工作屏与前台保护
+
+`COMPUTER_MONITOR=primary` 默认固定主屏；也可填 doctor 列出的设备名。任务启动时锁定该设备及显示布局，任务中不自动改屏。doctor 仅枚举、探测和截图，报告 `monitors` 中的 `device`、`primary`、物理矩形、`work_area`，以及 `target_monitor`、`capture_geometry`；不移动窗口，不恢复前台。设备配置无效时检查失败。
+
+```powershell
+.\run.cmd -Mode doctor -Profile computer
+.\run.cmd -Mode doctor -Profile computer -Monitor "\\.\DISPLAY2"
+.\run.cmd -Profile computer -Monitor "\\.\DISPLAY2" -Task "完成当前记事本任务"
+```
+
+同一选屏值会传给 setup doctor、computer-smoke 和 computer-acceptance。底层 Python 入口、doctor 和 smoke 使用 `--monitor`，未传时读 `COMPUTER_MONITOR`。已有窗口由用户完整移到工作屏并置于前台；跨屏窗口停止操作并提示调整。Agent 新开的浏览器及测试记事本自动放入工作屏工作区；显式接入的已有浏览器不移动。
+
+模型只看到工作屏截图；`capture_geometry` 保存截图物理原点与尺寸，`desktop_geometry` 保存完整虚拟桌面。截图坐标加工作屏原点得到 Win32 物理坐标，SendInput 仍按完整虚拟桌面归一化，支持副屏负坐标及不同分辨率、缩放比例。点击、滚动位置和拖拽全路径须在工作屏内；网页结构操作也须验证整个浏览器窗口在工作屏内。
+
+每次观察、动作执行前和实际发送输入前检查任务窗口、焦点事件版本与显示布局。仅启动确认、Agent 点击/明确切换窗口、打开任务浏览器及其所属对话框更新最近有效任务窗口。外部抢前台后废弃旧动作与定位，最多自动恢复一次最近任务窗口，恢复成功须重新截图、重新决策。恢复使用不注入键盘的 Win32 激活路径，并等待前台事件版本同步；系统拒绝激活、窗口关闭、已执行自动恢复之后又被抢前台（即使已切回原窗口）、窗口跨屏、目标屏消失或布局变化时安全停止。首次自动恢复之前短暂离开又返回时，旧观察和动作失效并重新观察，不按短暂切换次数直接停止。
+
+Agent 显式输出 `hotkey(keys=["alt", "tab"])` 时，执行层从本任务已合法确认的窗口历史中选择最近仍有效的其他任务窗口，并用 Win32 激活；目标须仍位于工作屏内，跳过已关闭窗口、跨屏窗口和原生对话框。此动作不发送全局 Alt+Tab，因此不会根据 Windows 全局窗口顺序切入副屏或个人应用。没有可切换的任务窗口时拒绝动作，可通过工作屏任务栏点击选择应用。窗口历史仅用于这种显式切换；历史任务窗口自行抢前台仍按外部干扰处理，不能自动获得操作授权。
+
+Win+R、Win+E 等普通快捷键创建的无所属关系新应用窗口不会自动获得任务授权，可能触发前台保护并恢复原任务窗口。启动或选择新应用时使用工作屏任务栏点击；快捷键的 `executed` 只表示已发送输入，须通过后续截图核对应用是否实际成为任务窗口。
+
+安全停止后停止调用模型，产物目录仍保存轨迹和报告；报告 `safety_stop=true`、`termination_reason="safety_stop"`，`safety_stop_detail` 保存原因码与说明，`final_answer` 显示具体原因，退出码非零。人工恢复后重新启动任务；没有断点续跑。fixture 停止后的清理不会向前台发送保存或关闭组合键；需要时测试文档保留供检查。
+
+副屏可继续显示内容，运行期间不要并行使用鼠标键盘。检查与输入之间仍有系统竞争；需要持续在副屏工作时使用独立虚拟机或独立交互会话。
+
 ## 真实任务与模型配置
 
 按用户提供的 API 参数配置根目录 `.env`，不要把密钥写进命令行或轨迹：
@@ -67,18 +91,19 @@ run.cmd -Mode computer-acceptance -Profile computer -Channel msedge -MaxSteps 30
 | 配置 | 行为 |
 | --- | --- |
 | `COMPUTER_BROWSER_CHANNEL` | `auto` 优先已安装 Chrome，再 Edge，再已安装的 Playwright Chromium；可固定 `chrome` / `msedge` / `chromium` |
+| `COMPUTER_MONITOR` | 默认 `primary`；可填 doctor 列出的显示器设备名，任务中固定工作屏 |
 | `COMPUTER_BROWSER_EXECUTABLE` | 显式指定浏览器可执行文件，避免依赖安装位置 |
 | `COMPUTER_CDP_ENDPOINT` | 接入已启动的本机 CDP 服务；不拥有、关闭或修改该浏览器的下载设置 |
 | `COMPUTER_BROWSER_PROFILE_DIR` | 留空为任务独立目录；显式配置为 Agent 持久目录，保留 Agent 登录状态 |
 | `COMPUTER_DOWNLOAD_DIR` | 自行启动浏览器的下载目录；留空保存到任务产物 downloads 目录 |
 
-也可使用 `run.cmd` 的 `-BrowserExecutable`、`-CdpEndpoint`、`-BrowserProfileDir`、`-DownloadDir` 参数覆盖。独立 Agent 配置不继承个人浏览器 cookies 或扩展。已打开的持久目录应通过 CDP 显式接入，避免同时启动两次。
+也可使用 `run.cmd` 的 `-BrowserExecutable`、`-CdpEndpoint`、`-BrowserProfileDir`、`-DownloadDir`、`-Monitor` 参数覆盖。独立 Agent 配置不继承个人浏览器 cookies 或扩展。已打开的持久目录应通过 CDP 显式接入，避免同时启动两次。
 
 当前结构提供者采用 Chromium CDP，覆盖 Chrome/Edge。浏览器安装路径可发现或配置；企业策略关闭远程调试、未接入的其他实例以及其他浏览器仍可通过桌面视觉操作。不能据此声称 Firefox/Safari 已支持相同结构接口；需要新增相应适配器。
 
 系统前台 HWND/PID、输入焦点、事件版本及真实网页焦点共同控制路由。适配器关闭自动化连接的焦点模拟，避免地址栏被误判为网页。CDP 的 browser PID 必须匹配当前系统前台进程；启动器委托另一进程时还核对该进程的配置目录。离开网页即失效结构引用；执行前再次核对焦点版本和桌面布局，推理期间切换后拒绝旧动作并重新观察。
 
-DOM 坐标保持 CSS 空间，由浏览器执行。视觉坐标是截图的物理像素，叠加虚拟桌面原点后由 Win32 执行，不混用两套坐标。截图不可用、定位越界或输入失败会记录拒绝/不确定，不伪造成功。
+DOM 坐标保持 CSS 空间，由浏览器执行。视觉坐标是截图的物理像素，叠加工作屏原点后由 Win32 执行，不混用两套坐标。截图不可用、定位越界或输入失败会记录拒绝/不确定，不伪造成功。
 
 ## 训练与后续评测
 

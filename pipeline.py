@@ -60,6 +60,7 @@ class AgentResult:
     screenshots: Dict[int, Any] = field(default_factory=dict)   # step -> 决策前截图（PIL 或 bytes）
     evaluation_available: bool = False
     termination_reason: str = "max_steps"
+    safety_stop: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -159,13 +160,17 @@ class Pipeline:
             state = self.preprocess(state)
             if state.obs is not None:
                 result.screenshots[step_no] = state.obs.screenshot
-            messages = self.build_input(state)
+            safety_stop = self._safety_stop(state.obs)
+            messages = self.build_input(state) if not safety_stop else []
             before = self._observation_record(state.obs, f"o_{step_no}")
             if getattr(self.env, "fresh_observations", False):
                 previous = next((t for t in reversed(result.trajectory) if t.get("next_observation")), None)
                 if previous:
                     previous["post_action_observation"] = previous["next_observation"]
                     previous["next_observation"] = copy.deepcopy(before)
+            if safety_stop:
+                self._stop_on_observation(result, safety_stop, before, step_no)
+                break
             decision = self.decide(messages)
             for call in decision.calls:
                 call["actor_role"] = "decision"
@@ -189,12 +194,28 @@ class Pipeline:
                     state.obs = fresh
                 next_id = f"after_a_{step_no}" if getattr(self.env, "fresh_observations", False) else f"o_{step_no+1}"
                 result.trajectory[-1]["next_observation"] = self._observation_record(state.obs, next_id)
+                safety_stop = self._safety_stop(state.obs)
+                if safety_stop:
+                    self._stop_on_observation(result, safety_stop, result.trajectory[-1]["next_observation"], step_no)
+                    break
                 continue
             ground_started = time.perf_counter()
-            action = self.ground(decision.action, state)
+            preflight = getattr(self.env, "preflight", None)
+            rejected = preflight(decision.action, state.obs) if preflight else None
+            if rejected:
+                # Do not locate an action against evidence the input guard has rejected.
+                action = decision.action
+                state.route = rejected
+                state.last_grounding_coord = None
+                state.last_grounding_target = str(action.args.get("target", ""))
+                state.grounding_calls = []
+                state.grounding_metadata = {}
+                state.offline_grounding_labels = []
+            else:
+                action = self.ground(decision.action, state)
             ground_ms = (time.perf_counter() - ground_started) * 1000
             execute_started = time.perf_counter()
-            execution = self.execute(action, state)
+            execution = self._rejected_execution(rejected) if rejected else self.execute(action, state)
             if execution.obs is None:
                 execution.obs = self._fresh_observation()
             execute_ms = (time.perf_counter() - execute_started) * 1000
@@ -213,22 +234,66 @@ class Pipeline:
                 "routing": copy.deepcopy(state.route) or {"channel": "visual" if self._coordinate_of(action) else "environment"},
                 "execution_info": execution.info, "reward": execution.reward,
                 "verification": self._verification if execution.kind == "finish_request" else None,
-                "terminated": bool(should_break and (result.success or execution.done)),
-                "truncated": bool(should_break and not (result.success or execution.done)),
+                "terminated": bool(should_break and not result.safety_stop and (result.success or execution.done)),
+                "truncated": bool(should_break and (result.safety_stop or not (result.success or execution.done))),
                 "timing_ms": {"ground": round(ground_ms, 2), "execute_observe": round(execute_ms, 2),
                               "total": round((time.perf_counter()-started)*1000, 2)}})
             if should_break:
-                result.termination_reason = "success" if result.success else ("failure" if execution.done else "stall")
+                if not result.safety_stop:
+                    result.termination_reason = "success" if result.success else ("failure" if execution.done else "stall")
                 break
 
-        result.score = self._evaluate(result)
-        # 补齐最后一步的 assessment（任务结束时没有下一步决策来评估 a_N）
-        self._fill_final_assessment(result)
+        if not result.safety_stop:
+            result.score = self._evaluate(result)
+            # 补齐最后一步的 assessment（任务结束时没有下一步决策来评估 a_N）
+            self._fill_final_assessment(result)
         transitions = [t for t in result.trajectory if "policy_input" in t]
         if transitions:
             transitions[-1]["truncated"] = not transitions[-1].get("terminated", False)
             transitions[-1]["done"] = True
         return result
+
+    @staticmethod
+    def _safety_stop(obs=None, info=None):
+        evidence = (info or {}).get("safety_stop")
+        if not evidence and obs is not None:
+            evidence = obs.info.get("safety_stop")
+        return copy.deepcopy(evidence) if isinstance(evidence, dict) and evidence else None
+
+    @staticmethod
+    def _mark_safety_stop(result, evidence, entry):
+        result.safety_stop = copy.deepcopy(evidence)
+        result.success = False
+        result.score = 0.0
+        result.evaluation_available = False
+        result.termination_reason = "safety_stop"
+        result.final_answer = str(evidence.get("reason") or "输入安全检查失败，任务已停止。")
+        entry.update(safety_stop=copy.deepcopy(evidence), done=True, terminated=False, truncated=True)
+        if entry.get("action"):
+            entry["assessment"] = {
+                "observed_effect": result.final_answer, "action_status": "uncertain", "source": "safety_stop",
+            }
+
+    def _stop_on_observation(self, result, evidence, observation, step_no):
+        event = {"event": "safety_stop", "step": step_no, "observation": copy.deepcopy(observation)}
+        self._mark_safety_stop(result, evidence, event)
+        result.trajectory.append(event)
+        # The interruption is evidence about the latest transition, even when no
+        # new action was sampled. Do not fabricate a decision or action for it.
+        previous = next((t for t in reversed(result.trajectory[:-1]) if "policy_input" in t), None)
+        if previous:
+            previous.update(done=True, terminated=False, truncated=True)
+            previous["next_observation"] = copy.deepcopy(observation)
+            if previous.get("action") and previous.get("assessment") is None:
+                previous["assessment"] = {
+                    "observed_effect": result.final_answer, "action_status": "uncertain", "source": "safety_stop",
+                }
+
+    @staticmethod
+    def _rejected_execution(rejected, kind="env"):
+        return Execution(kind=kind, outcome=str(rejected.get("reason") or
+            (rejected.get("safety_stop") or {}).get("reason") or "动作安全检查未通过"), executed="rejected",
+            info={**rejected, "status": "rejected", "dispatched": False})
 
     @staticmethod
     def _observation_record(obs, observation_id):
@@ -472,8 +537,7 @@ class Pipeline:
     def execute(self, action: Action, state: StepState) -> Execution:
         name = action.action
         if state.route and state.route.get("channel") == "reobserve":
-            return Execution(kind="browser_dom", outcome=state.route["reason"],
-                executed="rejected", info={"status": "rejected", "dispatched": False})
+            return self._rejected_execution(state.route, kind="browser_dom")
         if action.args.get("grounding_failed"):
             return Execution(kind="env", outcome="定位失败，未执行；请细化目标或使用inspect_page。" +
                              str((state.route or {}).get("reason", "")),
@@ -482,8 +546,7 @@ class Pipeline:
         rejected = preflight(action, state.obs) if preflight else None
         if rejected:
             state.route = rejected
-            return Execution(kind="env", outcome=rejected["reason"], executed="rejected",
-                             info={"status": "rejected", "dispatched": False})
+            return self._rejected_execution(rejected)
         if state.route and state.route.get("channel") == "browser_dom":
             try:
                 routed = self.env.execute_routed(action, state.route)
@@ -665,6 +728,10 @@ class Pipeline:
         before_screenshot = state.screenshot_history[-1] if state.screenshot_history else None
         if execution.obs is not None:
             state.obs = execution.obs
+        safety_stop = self._safety_stop(state.obs, execution.info)
+        if safety_stop:
+            self._mark_safety_stop(result, safety_stop, result.trajectory[-1])
+            return state, True
         # 6.5) 单步动作有效性校验：env 动作执行后屏幕无变化 → 当场提示换策略
         # （不等到连续 2 步 STALL，每一步点空/点错都立即提示，避免反复点同一无效目标）
         if execution.kind == "env" and execution.obs is not None and before_screenshot is not None:

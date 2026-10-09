@@ -166,6 +166,7 @@ function Import-AgentEnv {
     if (-not $env:OSWORLD_SNAPSHOT_NAME) { $env:OSWORLD_SNAPSHOT_NAME = 'init_state' }
     if (-not $env:OSWORLD_BROWSER_CHANNEL) { $env:OSWORLD_BROWSER_CHANNEL = 'auto' }
     if (-not $env:COMPUTER_BROWSER_CHANNEL) { $env:COMPUTER_BROWSER_CHANNEL = 'auto' }
+    if (-not $env:COMPUTER_MONITOR) { $env:COMPUTER_MONITOR = 'primary' }
     # OSWorld must inherit vmrun's location even when VMware did not update PATH.
     foreach ($installRoot in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
         if (-not $installRoot) { continue }

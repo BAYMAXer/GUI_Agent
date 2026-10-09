@@ -41,11 +41,12 @@ class BrowserOptions:
 
 
 class BrowserSession:
-    def __init__(self, page=None, options=None, foreground_check=None, foreground_probe=None):
+    def __init__(self, page=None, options=None, foreground_check=None, foreground_probe=None, input_guard=None):
         self.options = options or BrowserOptions()
         self.page = page
         self.foreground_check = foreground_check
         self.foreground_probe = foreground_probe
+        self.input_guard = input_guard
         self._managed_page = page is not None and foreground_check is None and foreground_probe is None
         self.scene = Scene()
         self._target_id = ""
@@ -101,7 +102,7 @@ class BrowserSession:
                 self._playwright = sync_playwright().start()
                 try:
                     self._browser = self._playwright.chromium.connect_over_cdp(
-                        self.options.endpoint, timeout=self.options.timeout_ms)
+                        self.options.endpoint, timeout=self.options.timeout_ms, no_defaults=True)
                 except Exception:
                     self._playwright.stop()
                     self._playwright = None
@@ -459,9 +460,25 @@ class BrowserSession:
 
     def execute(self, action, route):
         started, dispatched, obj = time.perf_counter(), False, None
+        preparatory_dispatched = False
+
+        def guard():
+            if self.input_guard:
+                try:
+                    self.input_guard()
+                except Exception as exc:
+                    raise BrowserActionError(str(exc), dispatched=dispatched or preparatory_dispatched) from exc
+
+        def require_type_focus():
+            # Page handlers can redirect focus after clicking or selecting text.
+            if not self._call(obj, "function(){let a=document.activeElement;while(a&&a.shadowRoot&&a.shadowRoot.activeElement)a=a.shadowRoot.activeElement;return a===this || this.contains(a)}"):
+                raise BrowserActionError("Focus changed during text input", dispatched=True)
+
         try:
             node, obj = self._check(route["target_ref"], route["snapshot_id"])
+            guard()
             self._cdp.send("DOM.scrollIntoViewIfNeeded", {"backendNodeId": node["backend_id"]})
+            preparatory_dispatched = True
             inspect = """function() {
               if (!this.isConnected || !(this instanceof Element)) return {error:'detached'};
               if (this.matches(':disabled') || this.getAttribute('aria-disabled') === 'true' || this.closest('[inert]')) return {error:'disabled'};
@@ -493,29 +510,53 @@ class BrowserSession:
                 matches = self._call(obj, "function(label){return Array.from(this.options).filter(o=>o.label===label && !o.disabled).map(o=>o.index)}", [str(args["option"])])
                 if len(matches) != 1:
                     raise BrowserActionError("Select option is absent or ambiguous")
+                guard()
                 dispatched = True
                 self._call(obj, """function(i){ this.selectedIndex=i; this.dispatchEvent(new Event('input',{bubbles:true})); this.dispatchEvent(new Event('change',{bubbles:true})); }""", [matches[0]])
             elif name == "scroll":
+                guard()
                 dispatched = True
                 self.page.mouse.move(point["x"], point["y"])
+                guard()
                 self.page.mouse.wheel(0, int(args["amount"]) * 120 * (-1 if args["direction"] == "up" else 1))
             else:
-                dispatched = True
-                self.page.mouse.click(point["x"], point["y"], button="right" if name == "right_click" else "left",
-                                      click_count=2 if name == "double_click" else 1)
+                button = "right" if name == "right_click" else "left"
+                guard()
+                if name == "double_click" and self.input_guard:
+                    self.page.mouse.move(point["x"], point["y"])
+                    preparatory_dispatched = True
+                    for click_count in (1, 2):
+                        guard()
+                        dispatched = True
+                        try:
+                            self.page.mouse.down(button=button, click_count=click_count)
+                        finally:
+                            # Release even when down was only partially dispatched.
+                            self.page.mouse.up(button=button, click_count=click_count)
+                else:
+                    dispatched = True
+                    self.page.mouse.click(point["x"], point["y"], button=button,
+                                          click_count=2 if name == "double_click" else 1)
                 if name == "type":
                     # Focus may be stolen by a click handler. Never type into a different node.
-                    if not self._call(obj, "function(){let a=document.activeElement;while(a&&a.shadowRoot&&a.shadowRoot.activeElement)a=a.shadowRoot.activeElement;return a===this || this.contains(a)}"):
-                        raise BrowserActionError("Focus changed after click", dispatched=True)
+                    require_type_focus()
                     if args.get("overwrite"):
+                        guard()
                         self.page.keyboard.press("ControlOrMeta+A")
+                        if self.input_guard:
+                            require_type_focus()
+                        guard()
                         self.page.keyboard.press("Backspace")
+                    if self.input_guard:
+                        require_type_focus()
+                    guard()
                     self.page.keyboard.insert_text(str(args["text"]))
             return {"status": "executed", "dispatched": True, "channel": "browser_dom",
                     "target_ref": route["target_ref"], "coord": [point["x"], point["y"]],
                     "coordinate_space": "css_viewport", "latency_ms": round((time.perf_counter()-started)*1000, 2)}
         except Exception as exc:
             # Never repeat an uncertain side effect through a different execution channel.
+            dispatched = dispatched or bool(getattr(exc, "dispatched", False))
             return {"status": "uncertain" if dispatched else "rejected", "dispatched": dispatched,
                     "channel": "browser_dom", "error": str(exc)[:500],
                     "latency_ms": round((time.perf_counter()-started)*1000, 2)}

@@ -61,7 +61,8 @@ def win32_api_check():
     user = ctypes.WinDLL("user32", use_last_error=True)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     for name in ("SetThreadDpiAwarenessContext", "GetForegroundWindow", "GetGUIThreadInfo",
-                 "SetWinEventHook", "SendInput", "GetWindowRect", "GetDpiForWindow"):
+                 "SetWinEventHook", "SendInput", "GetWindowRect", "GetDpiForWindow",
+                 "EnumDisplayMonitors", "GetMonitorInfoW", "SetWindowPos"):
         getattr(user, name)
     getattr(kernel, "QueryFullProcessImageNameW")
     return "Win32 DPI, foreground, focus monitoring and input APIs present; no input dispatched"
@@ -71,6 +72,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--desktop", action="store_true")
     parser.add_argument("--computer", action="store_true", help="Check real Windows capture/focus without injecting input")
+    parser.add_argument("--monitor", default=os.getenv("COMPUTER_MONITOR") or "primary",
+                        help="Work screen: primary or a display device name")
     parser.add_argument("--check-api", action="store_true", help="GET /models only; no inference request")
     parser.add_argument("--output", default="artifacts/doctor/report.json")
     args = parser.parse_args()
@@ -149,7 +152,7 @@ def main():
 
         def computer_check():
             from ..adapters.windows_env import WindowsEnvironment
-            environment = WindowsEnvironment(browser_config=config)
+            environment = WindowsEnvironment(browser_config=config, monitor=args.monitor)
             try:
                 # Only capture/probe: an optional configured CDP endpoint is not connected here.
                 foreground = environment.native.probe()
@@ -157,6 +160,8 @@ def main():
                 if screenshot is None or not foreground.available:
                     raise RuntimeError("Interactive desktop capture/focus is unavailable")
                 return {"screenshot_size": list(screenshot.size), "desktop_geometry": geometry,
+                        "monitor_selection": args.monitor, "target_monitor": geometry["target_monitor"],
+                        "capture_geometry": geometry["capture_geometry"], "monitors": geometry["monitors"],
                         "foreground_available": True, "browser_started": False,
                         "structure_connectivity_checked": False}
             finally:

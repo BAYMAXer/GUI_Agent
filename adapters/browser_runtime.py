@@ -78,6 +78,7 @@ class BrowserRuntime:
         self._last_attempt = 0.0
         self.structure_error = ""
         self.downloads = []
+        self.before_navigate = None
         if self.endpoint:
             host = urlparse(self.endpoint).hostname
             if host not in {"localhost", "127.0.0.1", "::1"}:
@@ -97,8 +98,9 @@ class BrowserRuntime:
         from playwright.sync_api import sync_playwright
         self._pw = sync_playwright().start()
         try:
+            # Preserve actual desktop focus when connecting to an existing visible browser.
             self._browser = self._pw.chromium.connect_over_cdp(
-                self.endpoint, timeout=self.config.connection_timeout_ms)
+                self.endpoint, timeout=self.config.connection_timeout_ms, no_defaults=True)
             cdp = self._browser.new_browser_cdp_session()
             try:
                 processes = cdp.send("SystemInfo.getProcessInfo")["processInfo"]
@@ -152,6 +154,17 @@ class BrowserRuntime:
             return replace(foreground, is_browser=False, reason="browser_instance_not_bound")
         return foreground
 
+    def _require_work_screen(self, window_id):
+        """CDP bypasses pointer boundaries, so verify the entire native window."""
+        geometry = self.native.geometry()
+        capture = geometry.get("capture_geometry", geometry)
+        bounds = self.native.window_bounds(window_id)
+        if not (bounds["right"] > bounds["left"] and bounds["bottom"] > bounds["top"] and
+                capture["left"] <= bounds["left"] and capture["top"] <= bounds["top"] and
+                bounds["right"] <= capture["left"] + capture["width"] and
+                bounds["bottom"] <= capture["top"] + capture["height"]):
+            raise RuntimeError("Browser window crosses the work screen boundary; move it fully onto the selected screen")
+
     def _adopt_delegated_process(self):
         """Retain visual browser control when a delegated launcher has no CDP service."""
         if not self.profile_dir or self.config.endpoint:
@@ -199,6 +212,12 @@ class BrowserRuntime:
             if self.session:
                 self.session.invalidate()
             return None
+        try:
+            self._require_work_screen(foreground.window_id)
+        except (RuntimeError, ValueError, OSError):
+            if self.session:
+                self.session.invalidate()
+            return None
         if self.endpoint and (self._browser is None or not self._browser.is_connected()):
             if time.monotonic() - self._last_attempt < 5:
                 return None
@@ -239,7 +258,7 @@ class BrowserRuntime:
             self._prelaunch_pids = set(psutil.pids())
             self.process = subprocess.Popen([str(executable), "--remote-debugging-port=0",
                 "--remote-debugging-address=127.0.0.1", "--user-data-dir=" + str(self.profile_dir),
-                "--no-first-run", "--no-default-browser-check", "--new-window", url or "about:blank"],
+                "--no-first-run", "--no-default-browser-check", "--new-window", "about:blank"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             self.process_id = self.process.pid
             deadline = time.monotonic() + self.config.startup_timeout_s
@@ -261,16 +280,36 @@ class BrowserRuntime:
         windows = self._wait_for_window(deadline)
         # When multiple windows exist, a focused CDP page identifies the active window.
         foreground = self.native.probe()
+        candidates = [window for window in windows if str(window) == str(foreground.window_id)]
+        window = candidates[0] if candidates else (windows[0] if len(windows) == 1 else None)
+        if window is None:
+            raise RuntimeError("Multiple browser windows; activate the intended window visually")
+        if first_launch:
+            self.native.place_window(window)
+        self._require_work_screen(window)
         if foreground.process_id != self.process_id or foreground.native_ui:
             if len(windows) != 1:
                 raise RuntimeError("Multiple browser windows; activate the intended window visually")
-            self.native.activate(windows[0])
-        navigation_needed = bool(url and not first_launch)
+            self.native.activate(window, allow_input_fallback=False)
+        foreground = self.native.probe()
+        if foreground.process_id != self.process_id or str(foreground.window_id) != str(window):
+            raise RuntimeError("Could not activate the task browser on the work screen")
+        self._require_work_screen(window)
+        navigation_needed = bool(url)
         if self._browser:
             pages = [page for ctx in self._browser.contexts for page in ctx.pages if not page.is_closed()]
             focused = [p for p in pages if self.session._real_page_focus(p)]
             page = focused[0] if len(focused) == 1 else (pages[0] if len(pages) == 1 and len(windows) == 1 else None)
-            if page is not None and url and not first_launch:
+            if page is not None and url:
+                self._require_work_screen(window)
+                current = self.native.probe()
+                # Opening a window may change its focused control; only a foreground
+                # transition invalidates this launch. The environment binds input next.
+                if (current.window_id != foreground.window_id or current.process_id != foreground.process_id or
+                        current.foreground_generation != foreground.foreground_generation):
+                    raise RuntimeError("Browser focus changed before navigation")
+                if self.before_navigate:
+                    self.before_navigate()
                 page.goto(url, wait_until="domcontentloaded", timeout=15000)
                 navigation_needed = False
         return {"browser_channel": self.channel, "structure_error": self.structure_error,

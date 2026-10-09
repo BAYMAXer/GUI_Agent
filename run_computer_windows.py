@@ -27,6 +27,8 @@ def build_parser():
     parser.add_argument("--browser-executable", default=os.environ.get("COMPUTER_BROWSER_EXECUTABLE", ""))
     parser.add_argument("--browser-profile-dir", default=os.environ.get("COMPUTER_BROWSER_PROFILE_DIR", ""))
     parser.add_argument("--download-dir", default=os.environ.get("COMPUTER_DOWNLOAD_DIR", ""))
+    parser.add_argument("--monitor", default=os.environ.get("COMPUTER_MONITOR") or "primary",
+                        help="Work screen: primary or a display device name from computer doctor")
     parser.set_defaults(cdp_endpoint=os.environ.get("COMPUTER_CDP_ENDPOINT", ""))
     return parser
 
@@ -38,7 +40,7 @@ def execute_task(args, *, environment=None):
     out.mkdir(parents=True, exist_ok=True)
     env = environment if environment is not None else WindowsEnvironment(browser_config=BrowserRuntimeConfig(channel=args.channel,
         executable=args.browser_executable, endpoint=args.cdp_endpoint, profile_dir=args.browser_profile_dir,
-        download_dir=args.download_dir), artifact_dir=out)
+        download_dir=args.download_dir), artifact_dir=out, monitor=args.monitor)
     model = grounding = None
     started = time.perf_counter()
     try:
@@ -69,6 +71,9 @@ def execute_task(args, *, environment=None):
                 for row in iter_sft_records(packed, actor_role=role, include_offline_labels=role == "grounding"):
                     stream.write(json.dumps(row, ensure_ascii=False) + "\n")
         report = {**packed["outcome"], "elapsed_s": round(time.perf_counter()-started, 2),
+            "safety_stop": bool(getattr(result, "safety_stop", False)),
+            "safety_stop_detail": packed["outcome"].get("safety_stop"),
+            "termination_reason": getattr(result, "termination_reason", ""),
             "decision_model": args.model, "grounding_model": args.ground_model if separate_grounding else args.model,
             "grounding_uses_plan_endpoint": not separate_grounding, "downloads": env.runtime.downloads,
             "trajectory": str(out / "trajectory.json"), "metrics": summarize_trajectory(packed)}
@@ -94,7 +99,7 @@ def main():
     if args.ground_url and not environment_setting(args.ground_key_env):
         parser.error("A separate grounding API requires its API key environment variable")
     report = execute_task(args)
-    return 0 if report["success"] else 1
+    return 0 if report["success"] and not report.get("safety_stop") else 1
 
 
 if __name__ == "__main__":

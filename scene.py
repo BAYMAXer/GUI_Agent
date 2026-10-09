@@ -23,6 +23,7 @@ class Foreground:
     reason: str = "foreground_unavailable"
     focus_id: str = ""
     generation: int = 0
+    foreground_generation: int = 0
 
     @classmethod
     def from_raw(cls, raw):
@@ -39,6 +40,7 @@ class Foreground:
             process_id=int(raw.get("process_id", 0)), process_name=process, window_class=klass,
             is_browser=name in _BROWSERS, native_ui=native,
             focus_id=str(raw.get("focus_id", "")), generation=int(raw.get("generation", 0)),
+            foreground_generation=int(raw.get("foreground_generation", 0)),
             reason="native_ui" if native else ("browser_foreground" if name in _BROWSERS else "desktop_foreground"))
 
 

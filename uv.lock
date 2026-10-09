@@ -283,7 +283,7 @@ wheels = [
 
 [[package]]
 name = "osworld-agent"
-version = "3.0.0"
+version = "3.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
@@ -306,7 +306,7 @@ requires-dist = [
     { name = "mss", specifier = ">=10.2,<12" },
     { name = "openai", specifier = ">=1.55,<3" },
     { name = "pillow", specifier = ">=10" },
-    { name = "playwright", specifier = ">=1.49,<2" },
+    { name = "playwright", specifier = ">=1.63,<2" },
     { name = "psutil", specifier = ">=6,<8" },
     { name = "pytest", specifier = ">=8,<10" },
     { name = "pyyaml", specifier = ">=6,<7" },

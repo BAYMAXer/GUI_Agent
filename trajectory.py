@@ -136,6 +136,7 @@ def build_trajectory(
             "routing": s.get("routing", {}),
             "resolved_action": s.get("resolved_action"),
             "execution_info": s.get("execution_info", {}),
+            "safety_stop": s.get("safety_stop"),
             "verification": s.get("verification"),
             "timing_ms": s.get("timing_ms", {}),
             "trainable": bool(s.get("policy_input") and s.get("policy_output") and s.get("valid_action", False)),
@@ -156,8 +157,10 @@ def build_trajectory(
             "evaluation_available": bool(getattr(result, "evaluation_available", False)),
             "reward_source": "environment_evaluator" if getattr(result, "evaluation_available", False) else "unavailable",
             "termination_reason": getattr(result, "termination_reason", "unknown"),
+            "safety_stop": copy.deepcopy(getattr(result, "safety_stop", {})) or None,
         },
         "steps": steps,
+        "events": [copy.deepcopy(s) for s in (result.trajectory or []) if s.get("event") == "safety_stop"],
     }
 
 

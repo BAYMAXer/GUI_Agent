@@ -61,15 +61,35 @@ def open_notepad(env, path):
         foreground = env.native.probe()
         if (foreground.process_name == "notepad.exe" and
                 path.stem.lower() in window_title(env.native.user, foreground.window_id).lower()):
+            env.native.place_window(foreground.window_id)
+            env.native.activate(foreground.window_id, allow_input_fallback=False)
+            foreground = env.native.probe()
+            if not env.adopt_window(foreground):
+                raise RuntimeError("Fixture Notepad could not be placed and activated on the work screen")
             return process, foreground
         time.sleep(0.1)
     raise RuntimeError("Could not bind the fixture's own Notepad window")
+
+
+def close_notepad(env, notepad, path):
+    """Close the owned fixture window without keyboard input or focus recovery."""
+    if notepad is None or getattr(env, "safety_stop", None):
+        return
+    user = env.native.user
+    pid = wt.DWORD()
+    user.GetWindowThreadProcessId(int(notepad.window_id), ctypes.byref(pid))
+    if (pid.value != notepad.process_id or
+            path.stem.lower() not in window_title(user, notepad.window_id).lower()):
+        return
+    user.PostMessageW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+    user.PostMessageW(int(notepad.window_id), 0x0010, 0, 0)  # WM_CLOSE, no input injected
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--channel", choices=["auto", "chrome", "msedge", "chromium"], default=os.getenv("COMPUTER_BROWSER_CHANNEL", "auto"))
     parser.add_argument("--browser-executable", default=os.getenv("COMPUTER_BROWSER_EXECUTABLE", ""))
+    parser.add_argument("--monitor", default=os.getenv("COMPUTER_MONITOR") or "primary")
     parser.add_argument("--output", default="artifacts/computer-smoke")
     args = parser.parse_args()
     output = Path(args.output).resolve()
@@ -91,7 +111,7 @@ def main():
     checks = []
     downloads = fixture_dir / "downloads"
     env = WindowsEnvironment(browser_config=BrowserRuntimeConfig(channel=args.channel,
-        executable=args.browser_executable, download_dir=str(downloads)), artifact_dir=output)
+        executable=args.browser_executable, download_dir=str(downloads)), artifact_dir=output, monitor=args.monitor)
     notepad = None
     report = {"test_kind": "scripted_policy_real_windows_desktop", "model_verified": False,
               "platform": platform.platform(), "success": False, "checks": checks}
@@ -112,10 +132,16 @@ def main():
         rect = wt.RECT()
         env.native.user.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
         env.native.user.GetWindowRect(int(window), ctypes.byref(rect))
-        geometry = env.observe().info["desktop_geometry"]
+        geometry = env.observe().info["capture_geometry"]
         # A blank content region of this known fixture, observed in the desktop screenshot.
         return action(Action("click", {"x": rect.left + 250 - geometry["left"],
                                       "y": rect.top + 350 - geometry["top"]}))
+
+    def activate_fixture(window):
+        env.native.activate(window, allow_input_fallback=False)
+        if not env.adopt_window():
+            raise RuntimeError("Fixture window activation failed on the work screen")
+        time.sleep(0.2)
 
     try:
         _, notepad = open_notepad(env, notes)
@@ -124,16 +150,21 @@ def main():
         observed.screenshot.save(output / "notepad-before.png")
         action(Action("open_browser", {"url": url}))
         observed = env.observe()
+        browser_window = env.native.probe().window_id
+        # A freshly opened about:blank window may retain omnibox focus after CDP
+        # navigation. Give this owned fixture real content focus before testing AX.
+        if not observed.browser_use:
+            focus_page(browser_window)
+            observed = env.observe()
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and not observed.structure_available:
             time.sleep(0.1)
             observed = env.observe()
         check("focused_page_has_structure", observed.browser_use and observed.structure_available, observed.info["scene"])
-        browser_window = env.native.probe().window_id
         old_snapshot = observed.info["scene"]["snapshot_id"]
         action(Action("hotkey", {"keys": ["ctrl", "l"]}))
         address = env.observe()
-        check("address_bar_visual", not address.browser_use and address.context == [])
+        check("address_bar_visual", not address.browser_use and address.context == [], address.info["scene"])
         action(Action("press", {"key": "esc"}))
         if not env.observe().browser_use:
             focus_page(browser_window)
@@ -149,23 +180,19 @@ def main():
         action(Action("press", {"key": "esc"}))
         if not env.observe().browser_use:
             focus_page(browser_window)
-        env.native.activate(notepad.window_id)
-        time.sleep(0.2)
+        activate_fixture(notepad.window_id)
         desktop = env.observe()
         check("background_browser_not_injected", not desktop.browser_use and desktop.context == [])
-        env.native.activate(browser_window)
-        time.sleep(0.2)
+        activate_fixture(browser_window)
         resumed = env.observe()
         check("new_snapshot_after_switch", resumed.browser_use and resumed.info["scene"]["snapshot_id"] != old_snapshot)
         # The old observation must fail even after returning to the same foreground HWND.
         check("away_and_back_preflight", env.preflight(Action("press", {"key": "enter"}), observed) is not None)
         resumed = env.observe()
         old_ref = next(n["ref"] for n in resumed.context[0]["nodes"] if n.get("role") == "button")
-        env.native.activate(notepad.window_id)
-        time.sleep(0.2)
+        activate_fixture(notepad.window_id)
         env.observe()
-        env.native.activate(browser_window)
-        time.sleep(0.2)
+        activate_fixture(browser_window)
         env.observe()
         stale = env.browser_session.route(Action("click", {"target": "检索论文", "target_ref": old_ref}), resumed)
         check("stale_reference_rejected", stale and stale["channel"] == "reobserve")
@@ -173,13 +200,14 @@ def main():
             executable=args.browser_executable), output / "other-instance")
         try:
             secondary.open(url)
+            if not env.adopt_window():
+                raise RuntimeError("Secondary fixture browser is outside the work screen")
             time.sleep(0.2)
             other = env.observe()
             check("other_browser_instance_visual", not other.browser_use and other.context == [])
         finally:
             secondary.close()
-        env.native.activate(browser_window)
-        time.sleep(0.2)
+        activate_fixture(browser_window)
         env.observe()
         session = env.browser_session
         session._cache_time = 0
@@ -195,9 +223,23 @@ def main():
             action(Action("press", {"key": "tab"}))
         finally:
             session._cdp.send = original_send
-        env.observe()
-        env.native.activate(notepad.window_id)
-        time.sleep(0.2)
+        before_interference = env.observe()
+        env.native.activate(notepad.window_id, allow_input_fallback=False)
+        time.sleep(0.1)
+        rejected = env.preflight(Action("press", {"key": "enter"}), before_interference)
+        recovered = env.observe()
+        check("interference_restored_once", rejected and rejected["channel"] == "reobserve"
+              and not env.safety_stop and recovered.info.get("focus_recovery", {}).get("status") == "restored"
+              and env.native.probe().window_id == browser_window, recovered.info.get("focus_recovery"))
+        env.native.activate(notepad.window_id, allow_input_fallback=False)
+        time.sleep(0.1)
+        env.native.activate(browser_window, allow_input_fallback=False)
+        time.sleep(0.1)
+        stopped = env.observe()
+        check("repeated_away_and_back_stops", stopped.info.get("safety_stop", {}).get("code") ==
+              "focus_interference_repeated" and stopped.screenshot is None, env.safety_stop)
+        env.reset(instructions)  # Start a new fixture task after the safety-stop check.
+        activate_fixture(notepad.window_id)
 
         class ScriptedGrounding(NullGrounding):
             calls = 0
@@ -207,7 +249,7 @@ def main():
                 rect = wt.RECT()
                 env.native.user.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
                 env.native.user.GetWindowRect(int(notepad.window_id), ctypes.byref(rect))
-                geometry = env.last_observation.info["desktop_geometry"]
+                geometry = env.last_observation.info["capture_geometry"]
                 return GroundingResult(rect.left + 150 - geometry["left"], rect.top + 200 - geometry["top"])
 
         class ScriptedPolicy(ChatModel):
@@ -257,19 +299,16 @@ def main():
                       downloads=env.runtime.downloads, metrics=summarize_trajectory(trajectory))
     except Exception as exc:
         report["error"] = str(exc)
+        report["safety_stop"] = env.safety_stop
+        report["last_scene"] = env.last_observation.info.get("scene") if env.last_observation else None
         if env.last_observation and env.last_observation.screenshot:
             env.last_observation.screenshot.save(output / "failure.png")
     finally:
         # Close only the verified fixture document; never close other Notepad windows.
-        if notepad and notes.stem.lower() in window_title(env.native.user, notepad.window_id).lower():
-            try:
-                env.native.activate(notepad.window_id)
-                env.observe()
-                env.step(Action("hotkey", {"keys": ["ctrl", "s"]}))
-                env.observe()
-                env.step(Action("hotkey", {"keys": ["ctrl", "w"]}))
-            except Exception:
-                pass
+        try:
+            close_notepad(env, notepad, notes)
+        except Exception:
+            pass
         env.close()
         server.shutdown()
         server.server_close()

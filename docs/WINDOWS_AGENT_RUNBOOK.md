@@ -8,7 +8,7 @@
 
 ## 0. 所需输入与执行条件
 
-仓库是 `https://github.com/BAYMAXer/GUI_Agent.git`，默认分支 `main`；第一版 `v1.0.0`、第二版 `v2.0.0` 保留，本指南对应第三版 `v3.0.0`。标签 checkout 为 detached HEAD，需要修改时先创建自己的工作分支。
+仓库是 `https://github.com/BAYMAXer/GUI_Agent.git`，默认分支 `main`；第一版 `v1.0.0`、第二版 `v2.0.0`、第三版 `v3.0.0` 保留。本指南对应最新增量版本 `v3.1.0`，包含固定工作屏、多屏坐标与前台输入保护。标签 checkout 为 detached HEAD，需要修改时先创建自己的工作分支。
 
 需要 Windows x64、64 位 PowerShell、已登录且已解锁的交互桌面，以及与目标应用相同的权限级别。不要在锁屏、断开的远程会话、Windows 服务或无人值守会话里执行 computer smoke/任务；computer 不支持 Headless。纯视觉任务不要求浏览器；本指南跨应用验收需可用的 Chrome/Edge，或明确选择安装 Playwright Chromium。先保存用户其他应用的工作，测试期间不要抢夺焦点或改变桌面布局。
 
@@ -23,6 +23,7 @@
 | 可选独立定位服务 | `GROUNDING_MODEL/API_URL/API_KEY` | 填写独立 URL 时须有相应模型 ID 和 Key |
 | 定位协议 | `GROUNDING_PROTOCOL` | 独立服务用实际协议 `structured` / `pixel` / `normalized` |
 | 本机浏览器设置 | `COMPUTER_BROWSER_*` / `COMPUTER_DOWNLOAD_DIR` / `COMPUTER_CDP_ENDPOINT` | 路径、专用登录配置及本机 CDP，按新电脑实际情况填写 |
+| 固定工作屏 | `COMPUTER_MONITOR` | 默认 `primary`；可用 computer doctor 列出的设备名，不能沿用原机的设备编号 |
 
 跨普通应用任务必须有能完成视觉定位的服务能力。未配置 `GROUNDING_API_URL` 时，computer 复用 PLAN 服务；PLAN 服务必须同时支持图片规划与所选定位协议，否则补齐独立服务。`GROUNDING_PROTOCOL` / `-GroundType` 也适用于复用，`auto` 按注册表选择，通常为 `structured`。不能因为网页唯一 AX 目标可操作，就声称普通应用定位也已验证。
 
@@ -36,7 +37,7 @@
 
 ```bat
 if not exist "%USERPROFILE%\source" mkdir "%USERPROFILE%\source"
-git clone --branch v3.0.0 https://github.com/BAYMAXer/GUI_Agent.git "%USERPROFILE%\source\GUI Agent 移植"
+git clone --branch v3.1.0 https://github.com/BAYMAXer/GUI_Agent.git "%USERPROFILE%\source\GUI Agent 移植"
 cd /d "%USERPROFILE%\source\GUI Agent 移植"
 git status --short --branch
 git rev-parse HEAD
@@ -46,7 +47,7 @@ git rev-parse HEAD
 
 ```powershell
 New-Item -ItemType Directory -Path "$env:USERPROFILE\source" -Force | Out-Null
-git clone --branch v3.0.0 https://github.com/BAYMAXer/GUI_Agent.git "$env:USERPROFILE\source\GUI Agent 移植"
+git clone --branch v3.1.0 https://github.com/BAYMAXer/GUI_Agent.git "$env:USERPROFILE\source\GUI Agent 移植"
 Set-Location -LiteralPath "$env:USERPROFILE\source\GUI Agent 移植"
 git status --short --branch
 git rev-parse HEAD
@@ -101,6 +102,19 @@ PowerShell 在 `run.cmd` 前加 `.\`。运行器从其他工作目录调用也�
 
 每次 fixture 和下载目录是独立新目录，避免旧文件误通过新任务。smoke 验证框架和焦点路由，不能证明真实模型准确率或任务成功，也不能把替身轨迹用于模型训练。
 
+### 确认新电脑的固定工作屏
+
+默认 `COMPUTER_MONITOR=primary` 只截取、操作主屏。先读取 doctor 中 `interactive Windows desktop` 检查的 `detail`：`monitors` 列出设备名 `device`、主屏标记 `primary`、物理矩形及 `work_area`；`target_monitor` 是所选设备，`capture_geometry` 是截图原点与尺寸。doctor 只探测与截图，不移动窗口、不恢复前台。
+
+需要副屏时，用 doctor 实际列出的设备名替换示例值，并在后续 doctor、smoke、acceptance 和用户任务中保持相同设置：
+
+```bat
+run.cmd -Mode doctor -Profile computer -Monitor "\\.\DISPLAY2"
+run.cmd -Mode computer-smoke -Profile computer -Monitor "\\.\DISPLAY2" -Channel msedge
+```
+
+也可把选定设备写入 `.env` 的 `COMPUTER_MONITOR`；`-Monitor` 覆盖本次调用，底层 Python 用 `--monitor`。首次安装前还未枚举设备时先保留 `primary`。已有任务窗口须完整移到工作屏并置于前台；Agent 创建的浏览器与测试记事本自动放入该屏工作区，接入的已有 CDP 浏览器不移动。设备名无效时 doctor 失败；任务中设备消失、窗口跨屏或显示布局变化时安全停止，不自动改屏。不要并行在副屏输入鼠标或键盘。
+
 ## 4. 填写模型与浏览器配置
 
 主入口是根目录 `.env`，按实际服务信息填写：
@@ -112,6 +126,7 @@ PLAN_API_KEY=用户提供的Key
 PLAN_THINKING_STYLE=none
 
 COMPUTER_BROWSER_CHANNEL=msedge
+COMPUTER_MONITOR=primary
 COMPUTER_BROWSER_EXECUTABLE=
 COMPUTER_BROWSER_PROFILE_DIR=
 COMPUTER_DOWNLOAD_DIR=
@@ -147,6 +162,8 @@ GROUNDING_THINKING_STYLE=none
 ```bat
 run.cmd -Mode computer-acceptance -Profile computer -Channel msedge -MaxSteps 30
 ```
+
+该命令读取 `.env` 的 `COMPUTER_MONITOR`。若上一阶段用 `-Monitor` 指定了副屏，也在本命令传相同值，如 `-Monitor "\\.\DISPLAY2"`；避免 doctor 和实际任务使用不同屏幕。
 
 该命令分阶段执行 computer doctor、固定策略 smoke 和真实模型跨应用本地任务。环境报告在 `artifacts/computer-acceptance/doctor.json`。真实任务从记事本任务指令出发，检索本地测试页中的 GUI Agent Browser Study，下载 PDF，然后回到同一记事本文档，把全文替换为以下指定结果并保存：
 
@@ -188,7 +205,13 @@ PowerShell：
 
 Key 由 `.env` 加载。`-Model`、`-ApiUrl`、`-GroundType` 只覆盖本次调用，`-TrustEnv` 允许模型 API 使用环境代理；浏览器参数可通过 `.env` 或 `-BrowserExecutable`、`-BrowserProfileDir`、`-DownloadDir`、`-CdpEndpoint` 覆盖。
 
+用户任务同样可用 `-Monitor "\\.\DISPLAY2"` 覆盖工作屏。模型只看工作屏截图；截图坐标加该屏物理原点后发送输入，完整虚拟桌面仍用于 SendInput 坐标归一化，支持负坐标副屏及不同缩放。点击、滚动位置与拖拽路径须在工作屏内，网页结构操作也要校验浏览器窗口在工作屏内。
+
+模型显式请求 Alt+Tab 时，只在本任务已合法确认且仍位于工作屏的窗口历史中切换，不发送系统全局 Alt+Tab；没有可切换窗口时拒绝，可通过工作屏任务栏选择应用。历史窗口自行抢前台仍算干扰。Win+R / Win+E 等快捷键打开的新应用窗口若无任务窗口所属关系，不会自动获得授权，可能被恢复到旧窗口；新应用建议通过工作屏任务栏点击启动或选择。外部抢占后废弃旧动作，最多恢复一次最近有效任务窗口，成功后重新截图、重新决策；恢复失败或已经自动恢复一次后又被抢则安全停止。首次自动恢复前短暂离开又返回会丢弃旧观察和动作并重新观察，不因此直接停止。每次观察、执行前和实际发送输入前均检查前台、焦点事件版本与显示布局，但无法消除系统竞争，需要持续副屏交互时使用独立虚拟机或独立交互会话。
+
 普通任务默认生成 `artifacts/computer-agent/<时间-标识>/`，包含 report、trajectory、decision SFT、grounding SFT 和截图。任务失败返回非零；没有独立 evaluator 时 `score=null`，需要用户目标定义的文件、页面状态或其他独立结果证据，不能声称基准满分。
+
+报告出现 `safety_stop=true`、`termination_reason="safety_stop"` 时，读取 `safety_stop_detail` 的原因码和说明，保留报告与轨迹。人工恢复前台窗口、工作屏布局和交互条件后，用新输出目录重新启动任务；不支持断点续跑。验收发生安全停止不能报 passed。停止后的 fixture 清理不发送保存/关闭组合键，测试文档可能保留供检查。具体保护规则见 [工作屏与前台保护](WINDOWS_COMPUTER_USE.md#工作屏与前台保护)。
 
 ## 7. 浏览器专项附录
 
@@ -238,6 +261,8 @@ VM CLI 读取 `.env` 的 `PLAN_*` / `GROUNDING_*`；Web GUI 使用 `config/model
 | `Missing expected target directory for Python minor version link` | 脚本尝试固定补丁版本真实 exe；仍失败用本机 Python 3.12 x64 的 `-Python` 安装，保留 uv 存储 |
 | 锁文件不一致或旧 venv 不适用 | 检查源码与锁版本；必要时 `setup.cmd -Profile computer -RecreateVenv -SkipSmoke` 保留旧环境重建 |
 | 截图、前台焦点或输入不可用 | 解锁并恢复交互桌面，检查会话与权限一致，避免焦点被其他操作抢夺 |
+| 工作屏无效、窗口跨屏或布局变更 | 从 computer doctor 重新确认设备与物理矩形，把任务窗口完整移入工作屏，再以相同 Monitor 新启动 |
+| `safety_stop=true` | 读取原因并保留轨迹；恢复任务前台、屏幕与交互条件后新启动，不断点续跑或改写成功 |
 | Chrome/Edge 无法启动 | 核对 channel、实际 exe、企业远程调试策略、专用 profile 是否被占用；尝试实际已安装 channel |
 | 网页没有 AX / 进入地址栏或对话框 | 视觉回退是预期行为；核对定位服务能根据实际桌面截图操作，不注入后台 AX |
 | 401/403 / 模型不存在 / 定位响应不兼容 | 核对实际 ID、base URL、Key、权限与定位协议；不输出 Key，不编造坐标 |
@@ -246,8 +271,8 @@ VM CLI 读取 `.env` 的 `PLAN_*` / `GROUNDING_*`；Web GUI 使用 `config/model
 
 浏览器下载可使用 `HTTPS_PROXY`、`NODE_EXTRA_CA_CERTS`、`PLAYWRIGHT_DOWNLOAD_HOST`。uv Windows 版本链接问题见 [上游记录](https://github.com/astral-sh/uv/issues/19622)；机制参考 [uv 安装](https://docs.astral.sh/uv/getting-started/installation/)、[Python 管理](https://docs.astral.sh/uv/guides/install-python/)、[锁定同步](https://docs.astral.sh/uv/concepts/projects/sync/) 和 [Playwright 浏览器](https://playwright.dev/python/docs/browsers)。
 
-交付时说明提交/标签、uv/Python/实际浏览器版本、每一阶段结果、真实模型是否经独立 evaluator 验证、用户任务结果和本机报告/轨迹绝对路径。缺参数时准确列出缺失项，不给未经执行的“已跑通”结论。
+交付时说明提交/标签、uv/Python/实际浏览器版本、所选工作屏设备与截图矩形、每一阶段结果、真实模型是否经独立 evaluator 验证、用户任务结果和本机报告/轨迹绝对路径。发生安全停止时附原因与重新启动条件；缺参数时准确列出缺失项，不给未经执行的“已跑通”结论。
 
 可直接交给新电脑 Agent：
 
-> 完整读取 `docs/WINDOWS_AGENT_RUNBOOK.md`，按 `computer` 主线完成 uv 环境、Windows 交互桌面自检、固定策略跨应用 smoke 和真实模型 computer-acceptance。复用已有配置并保留代码修改；缺模型参数时先执行无需模型的阶段，再请求必要输入。以退出码、独立下载文件/记事本结果核验、JSON 报告和轨迹截图判断完成，最后给出证据路径。浏览器专项和 VMware 只有我明确需要时再执行。
+> 完整读取 `docs/WINDOWS_AGENT_RUNBOOK.md`，按 `computer` 主线完成 uv 环境、Windows 交互桌面自检、固定工作屏配置、固定策略跨应用 smoke 和真实模型 computer-acceptance。复用已有配置并保留代码修改；缺模型参数时先执行无需模型的阶段，再请求必要输入。使用同一个选屏值，以退出码、独立下载文件/记事本结果核验、JSON 报告和轨迹截图判断完成，最后给出证据路径；安全停止后保留证据，恢复条件后新启动。浏览器专项和 VMware 只有我明确需要时再执行。

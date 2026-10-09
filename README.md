@@ -16,9 +16,9 @@ Agent 在本机运行，决策和视觉定位通过兼容 OpenAI Chat Completion
 
 ## 1. 仓库与版本
 
-代码仓库：[BAYMAXer/GUI_Agent](https://github.com/BAYMAXer/GUI_Agent)，默认分支 `main`。第一版 `v1.0.0`、第二版 `v2.0.0` 保留，第三版 `v3.0.0` 包含本次 Windows 通用 GUI 运行与移植方案。版本区别见 [版本记录](docs/VERSIONS.md)。
+代码仓库：[BAYMAXer/GUI_Agent](https://github.com/BAYMAXer/GUI_Agent)，默认分支 `main`。最新增量版本 `v3.1.0` 在第三版通用 GUI 方案上增加固定工作屏、多屏坐标和前台输入保护；第一版 `v1.0.0`、第二版 `v2.0.0`、第三版 `v3.0.0` 保留。版本区别见 [版本记录](docs/VERSIONS.md)。
 
-固定版本使用 `git clone --branch v3.0.0 https://github.com/BAYMAXer/GUI_Agent.git osworld_agent`；需要修改时先从标签创建自己的工作分支。不要复制旧 `.venv` 到新电脑，虚拟环境需要在目标路径重新创建。
+固定最新版本使用 `git clone --branch v3.1.0 https://github.com/BAYMAXer/GUI_Agent.git osworld_agent`；需要修改时先从标签创建自己的工作分支。不要复制旧 `.venv` 到新电脑，虚拟环境需要在目标路径重新创建。
 
 `.gitignore` 排除 `.env`、`.venv`、本机预设、产物、外部 OSWorld 目录和 VM 文件。真实 Key 放 `.env` 或忽略的 `config/model_presets.local.yaml`；已有共享配置中的地址仍需按实际网络核对。上传前检查 `git status --short` 和 `git diff --cached`，不要把 Key 加进仓库 URL。
 
@@ -34,7 +34,7 @@ winget install --id Git.Git --exact --source winget --accept-package-agreements 
 
 ```bat
 if not exist "%USERPROFILE%\source" mkdir "%USERPROFILE%\source"
-git clone --branch v3.0.0 https://github.com/BAYMAXer/GUI_Agent.git "%USERPROFILE%\source\GUI Agent 移植"
+git clone --branch v3.1.0 https://github.com/BAYMAXer/GUI_Agent.git "%USERPROFILE%\source\GUI Agent 移植"
 cd /d "%USERPROFILE%\source\GUI Agent 移植"
 setup.cmd -Profile computer -SkipSmoke
 run.cmd -Mode doctor -Profile computer
@@ -45,7 +45,7 @@ PowerShell 等效命令：
 
 ```powershell
 New-Item -ItemType Directory -Path "$env:USERPROFILE\source" -Force | Out-Null
-git clone --branch v3.0.0 https://github.com/BAYMAXer/GUI_Agent.git "$env:USERPROFILE\source\GUI Agent 移植"
+git clone --branch v3.1.0 https://github.com/BAYMAXer/GUI_Agent.git "$env:USERPROFILE\source\GUI Agent 移植"
 Set-Location -LiteralPath "$env:USERPROFILE\source\GUI Agent 移植"
 .\setup.cmd -Profile computer -SkipSmoke
 .\run.cmd -Mode doctor -Profile computer
@@ -69,6 +69,7 @@ PLAN_API_KEY=实际密钥
 PLAN_THINKING_STYLE=none
 
 COMPUTER_BROWSER_CHANNEL=auto
+COMPUTER_MONITOR=primary
 COMPUTER_BROWSER_EXECUTABLE=
 COMPUTER_BROWSER_PROFILE_DIR=
 COMPUTER_DOWNLOAD_DIR=
@@ -91,9 +92,10 @@ GROUNDING_THINKING_STYLE=none
 
 `.env` 支持 `NAME=value`、整行注释和带引号的字面值，不支持变量展开、行尾注释或多行值。终端已有的非空环境变量优先；路径相对仓库根目录解析，可包含中文和空格。
 
-| 浏览器配置 | 用途 |
+| computer 配置 | 用途 |
 | --- | --- |
 | `COMPUTER_BROWSER_CHANNEL` | `auto` 尝试已安装 Chrome、Edge，再 Playwright Chromium；可固定 `chrome` / `msedge` / `chromium` |
+| `COMPUTER_MONITOR` | 固定工作屏，默认 `primary`；可填 computer doctor 列出的显示器设备名，如 `\\.\DISPLAY2` |
 | `COMPUTER_BROWSER_EXECUTABLE` | 显式浏览器 exe，例如 `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe` |
 | `COMPUTER_BROWSER_PROFILE_DIR` | 留空使用独立任务目录；填写专用 Agent 配置目录可保留登录状态 |
 | `COMPUTER_DOWNLOAD_DIR` | 自行启动浏览器的下载目录；留空保存到任务产物的 downloads 目录 |
@@ -123,6 +125,20 @@ run.cmd -Profile computer -Task "完成当前桌面任务" -Channel chrome -Brow
 ```
 
 PowerShell 在命令前加 `.\`。可用 `-Model`、`-ApiUrl`、`-GroundType` 覆盖本次模型设置，`-TrustEnv` 允许模型请求使用系统代理。computer 任务必须提供 `-Task`，不支持 `-Headless`。默认输出在 `artifacts/computer-agent/<时间-标识>/`；自定义任务没有独立 evaluator 时 `score=null`，完成结论须结合用户指定的结果证据。
+
+双屏默认只截取、操作主屏。已有任务窗口须完整移入工作屏并设为前台；Agent 新开的浏览器自动放到该屏。先用 `run.cmd -Mode doctor -Profile computer` 查看设备名与物理矩形，再用 `-Monitor "\\.\DISPLAY2"` 覆盖本次工作屏（底层 Python 参数为 `--monitor`）。doctor、smoke 与 acceptance 使用相同选屏设置；目标设备无效、消失或布局变化时拒绝继续。
+
+例如在 CMD 指定 doctor 实际列出的副屏设备名：
+
+```bat
+run.cmd -Mode doctor -Profile computer -Monitor "\\.\DISPLAY2"
+run.cmd -Mode computer-acceptance -Profile computer -Monitor "\\.\DISPLAY2" -Channel msedge -MaxSteps 30
+run.cmd -Profile computer -Monitor "\\.\DISPLAY2" -Task "完成当前记事本任务" -MaxSteps 30 -Output "artifacts\副屏任务 01"
+```
+
+Agent 输出 Alt+Tab 动作时，执行层激活本任务最近合法确认、仍在工作屏内的其他窗口；不发送 Windows 全局 Alt+Tab。历史窗口仅供显式切换使用，自行抢前台仍会触发干扰处理。Win+R / Win+E 等快捷键打开的新应用窗口若无任务窗口所属关系，不会自动获得授权，可能被恢复到旧窗口；新应用建议通过工作屏任务栏点击启动或选择。
+
+抢前台后，每次任务最多自动恢复一次最近有效任务窗口并重新截图；恢复失败或已经自动恢复一次后又被抢时安全停止，保存轨迹和 `report.json`，退出码非零。首次自动恢复前短暂离开又返回会丢弃旧观察和动作并重新观察，不因此直接停止。报告中 `safety_stop=true`、`termination_reason="safety_stop"`，原因保存在 `safety_stop_detail`。人工恢复窗口后重新启动任务，不支持断点续跑。运行期间不要在副屏并行使用鼠标键盘；输入检查无法消除系统竞争，需要继续副屏交互时使用独立虚拟机或独立交互会话。细节见 [工作屏与前台保护](docs/WINDOWS_COMPUTER_USE.md#工作屏与前台保护)。
 
 底层入口 `python -m osworld_agent.run_computer_windows --help` 不读取 `.env`；使用包装器可自动加载配置和检查环境。`config.yaml` / `python -m osworld_agent.main` 仍为旧 OSWorld 配置与占位入口。
 
